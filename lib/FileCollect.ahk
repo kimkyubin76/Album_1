@@ -5,21 +5,13 @@
 
 GatherAlbum(root) {
     f := []
-    ; 1) 숫자폴더 (01~99)
+    ; 1) 폴더 수집 (숫자 01~99 + 키워드 매칭)
+    folders := []
     Loop CFG.AlbumMax {
         sub := root "\" Format("{:02}", A_Index)
-        if !DirExist(sub)
-            continue
-        for ext in CFG.Ext
-            Loop Files, sub "\*." ext, "FR" {
-                if IsExcluded(A_LoopFileName, A_LoopFileDir) {
-                    FILT.Excluded++
-                    continue
-                }
-                f.Push(A_LoopFilePath)
-            }
+        if DirExist(sub)
+            folders.Push({path: sub, name: Format("{:02}", A_Index)})
     }
-    ; 2) 앨범 키워드 매칭 폴더 (비숫자)
     if FILT.AlbumKW.Length > 0 {
         Loop Files, root "\*", "D" {
             dirName := A_LoopFileName
@@ -28,17 +20,23 @@ GatherAlbum(root) {
                 continue
             if !_MatchesKeyword(dirName, FILT.AlbumKW)
                 continue
-            for ext in CFG.Ext
-                Loop Files, dirPath "\*." ext, "FR" {
-                    if IsExcluded(A_LoopFileName, A_LoopFileDir) {
-                        FILT.Excluded++
-                        continue
-                    }
-                    f.Push(A_LoopFilePath)
-                }
+            folders.Push({path: dirPath, name: dirName})
         }
     }
-    ; 3) 루트 직접 이미지
+    ; 폴더명 기준 오름차순 정렬 (숫자→문자)
+    folders := _SortAlbumFolders(folders)
+    ; 정렬된 순서로 파일 수집
+    for fd in folders {
+        for ext in CFG.Ext
+            Loop Files, fd.path "\*." ext, "FR" {
+                if IsExcluded(A_LoopFileName, A_LoopFileDir) {
+                    FILT.Excluded++
+                    continue
+                }
+                f.Push(A_LoopFilePath)
+            }
+    }
+    ; 2) 루트 직접 이미지
     for ext in CFG.Ext
         Loop Files, root "\*." ext, "F" {
             if IsExcluded(A_LoopFileName, A_LoopFileDir) {
@@ -53,8 +51,10 @@ GatherAlbum(root) {
 GatherFrame(rootUnused := "") {
     items   := []
     folders := ST.HasOwnProp("FrameFolders") && ST.FrameFolders.Length > 0
-        ? ST.FrameFolders
+        ? ST.FrameFolders.Clone()
         : [ST.FramePath]
+    ; 폴더명 기준 오름차순 정렬 (숫자→문자)
+    folders := _SortPathsByFolderName(folders)
     for folderPath in folders {
         SplitPath(folderPath, &folderName)
         for ext in CFG.Ext {
@@ -168,4 +168,54 @@ CountImagesFlat(dir) {
         }
     }
     return 0
+}
+
+; 폴더명 정렬 키: 숫자(01~99) → 숫자 크기순, 그 외 → 가나다순
+_FolderSortKey(name) {
+    if RegExMatch(name, "^\d{1,2}$") {
+        v := Integer(name)
+        if v >= 1 && v <= CFG.AlbumMax
+            return "A_" Format("{:04}", v)
+    }
+    return "B_" StrLower(name)
+}
+
+; 앨범 폴더 배열 정렬 (폴더명 기준)
+_SortAlbumFolders(folders) {
+    n := folders.Length
+    Loop n - 1 {
+        i := A_Index + 1
+        key := folders[i]
+        j := i - 1
+        while j >= 1 && StrCompare(_FolderSortKey(folders[j].name), _FolderSortKey(key.name)) > 0 {
+            folders[j + 1] := folders[j]
+            j--
+        }
+        folders[j + 1] := key
+    }
+    return folders
+}
+
+; 경로 배열을 폴더명 기준 정렬
+_SortPathsByFolderName(paths) {
+    pairs := []
+    for p in paths {
+        SplitPath(p, &name)
+        pairs.Push({path: p, name: name})
+    }
+    n := pairs.Length
+    Loop n - 1 {
+        i := A_Index + 1
+        key := pairs[i]
+        j := i - 1
+        while j >= 1 && StrCompare(_FolderSortKey(pairs[j].name), _FolderSortKey(key.name)) > 0 {
+            pairs[j + 1] := pairs[j]
+            j--
+        }
+        pairs[j + 1] := key
+    }
+    out := []
+    for p in pairs
+        out.Push(p.path)
+    return out
 }
