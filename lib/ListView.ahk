@@ -107,6 +107,7 @@ _SetLVColWidths() {
     ; CustomDraw용 col0W 캐시 갱신
     global _LV_Col0W
     _LV_Col0W := Max(56, c1)
+    _UpdateColHeaders(ST.SortCol, ST.SortAsc)
 }
 
 ; SetTimer 콜백 — HDN_ENDTRACK 후 300ms 디바운스 저장
@@ -146,13 +147,31 @@ _NatCmp(a, b) {
     return DllCall("shlwapi\StrCmpLogicalW", "WStr", a, "WStr", b, "Int")
 }
 
-; 커스텀 헤더 텍스트에 ▲/▼ 정렬 방향 표시
+; 네이티브 헤더 텍스트에 ▲/▼ 정렬 방향 표시 (HDM_SETITEM)
 _UpdateColHeaders(sortCol, sortAsc) {
     arrow := sortAsc ? " ▲" : " ▼"
-    UI.LVHdr1.Text := (sortCol = 1) ? "앨범" arrow : "앨범"
-    UI.LVHdr2.Text := (sortCol = 2) ? "상태" arrow : "상태"
-    UI.LVHdr3.Text := (sortCol = 3) ? " 사이즈폴더" arrow : " 사이즈폴더"
-    UI.LVHdr4.Text := (sortCol = 4) ? " 파일명" arrow : " 파일명"
+    labels := [
+        (sortCol = 1) ? "앨범" arrow : "앨범",
+        (sortCol = 2) ? "상태" arrow : "상태",
+        (sortCol = 3) ? " 사이즈폴더" arrow : " 사이즈폴더",
+        (sortCol = 4) ? " 파일명" arrow : " 파일명"
+    ]
+    HDR_HWND := SendMessage(0x101F, 0, 0, UI.LV)  ; LVM_GETHEADER
+    if !HDR_HWND
+        return
+    HDI_TEXT := 0x0004
+    HDM_SETITEM := 0x120C
+    Loop 4 {
+        i := A_Index - 1
+        txt := labels[A_Index]
+        strBuf := Buffer(StrLen(txt) * 2 + 2, 0)
+        StrPut(txt, strBuf, "UTF-16")
+        itemBuf := Buffer(A_PtrSize = 8 ? 72 : 56, 0)
+        NumPut("UInt", HDI_TEXT, itemBuf, 0)
+        NumPut("Ptr", strBuf.Ptr, itemBuf, 8)
+        NumPut("Int", StrLen(txt) + 1, itemBuf, 24)
+        DllCall("SendMessage", "Ptr", HDR_HWND, "UInt", HDM_SETITEM, "Ptr", i, "Ptr", itemBuf.Ptr)
+    }
 }
 
 ; 앨범 컬럼 표시 문자열 (MATCH: 앨범번호|파일명, NOT FOUND: 앨범번호만)
