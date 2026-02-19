@@ -24,7 +24,11 @@ OnItemFocus(ctrl, row) {
         UI.BtnMemo.Visible := false
 
         if e.albumNum != "" && e.albumNum != "-" && e.albumNum != "?" {
-            UI.BadgeTop.Text := e.albumNum
+            ; MATCH: 앨범번호 | 파일명 형태로 표시
+            if (e.HasProp("albumMatchFile") && e.albumMatchFile != "")
+                UI.BadgeTop.Text := e.albumNum " | " e.albumMatchFile
+            else
+                UI.BadgeTop.Text := e.albumNum " | (파일없음)"
             UI.BadgeTop.Visible := true
             _RepositionBadgeTop()
         } else {
@@ -109,7 +113,8 @@ OnMatchCombo(ctrl, *) {
     UI.FullPath       := mp
     UI.PicFootA.Text  := "  " _ShortPath(mp)
     if n != "" && n != "-" && n != "?" {
-        UI.BadgeTop.Text    := n
+        SplitPath(mp, &fn)
+        UI.BadgeTop.Text    := fn != "" ? (n " | " fn) : (n " | (파일없음)")
         UI.BadgeTop.Visible := true
         _RepositionBadgeTop()
     } else {

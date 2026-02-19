@@ -18,7 +18,8 @@
 global _EP := {
     F: { path: "", treeW: 180, bounds: {x:0,y:0,w:400,h:200} },
     A: { path: "", treeW: 180, bounds: {x:0,y:0,w:400,h:200}
-        , listRows: [], sortCol: 1, sortAsc: true }
+        , listRows: [], sortCol: 1, sortAsc: true
+        , viewMode: "details", iconSize: 48 }
 }
 
 global _EPDrag := { Active: false, Side: "", StartX: 0, StartTreeW: 0, LastT: 0 }
@@ -369,6 +370,16 @@ _EP_PopulateList(side, dirPath) {
         ep.listRows := rows
         _EP_SortExpListRows(rows, ep.sortCol, ep.sortAsc)
         _EP_UpdateExpLvAHeader(ep.sortCol, ep.sortAsc)
+        ; 아이콘/작은아이콘 보기: 전용 ImageList 생성 및 iconIdx 갱신
+        if ep.viewMode = "icon" || ep.viewMode = "smallicon" {
+            sz := ep.viewMode = "smallicon" ? 16 : ep.iconSize
+            hIL := _EP_CreateExpIconList(sz, ep.viewMode = "icon" ? dirPath : "")
+            lv.SetImageList(hIL, ep.viewMode = "smallicon" ? 1 : 0)
+            SendMessage(0x108E, ep.viewMode = "smallicon" ? 2 : 0, 0, lv)
+        } else {
+            lv.SetImageList(_EP_IL_LV, 1)
+            SendMessage(0x108E, ep.viewMode = "list" ? 3 : 1, 0, lv)
+        }
     } else {
         ; 액자 패널(F): 폴더→파일 순 유지 (Loop Files 순서)
     }
@@ -593,6 +604,8 @@ _EP_SaveSettings() {
     try {
         IniWrite(_EP.F.treeW, SETTINGS_INI, "Explorer", "FrameTreeWidth")
         IniWrite(_EP.A.treeW, SETTINGS_INI, "Explorer", "AlbumTreeWidth")
+        IniWrite(_EP.A.viewMode, SETTINGS_INI, "Explorer", "AlbumViewMode")
+        IniWrite(_EP.A.iconSize, SETTINGS_INI, "Explorer", "AlbumIconSize")
     }
 }
 
@@ -600,6 +613,8 @@ _EP_LoadSettings() {
     global _EP, SETTINGS_INI
     try _EP.F.treeW := Integer(IniRead(SETTINGS_INI, "Explorer", "FrameTreeWidth", "180"))
     try _EP.A.treeW := Integer(IniRead(SETTINGS_INI, "Explorer", "AlbumTreeWidth", "180"))
+    try _EP.A.viewMode := IniRead(SETTINGS_INI, "Explorer", "AlbumViewMode", "details")
+    try _EP.A.iconSize := Integer(IniRead(SETTINGS_INI, "Explorer", "AlbumIconSize", "48"))
 }
 
 ; ============================================================
@@ -667,6 +682,11 @@ _EP_OnLvCtxMenu(side, ctrl, item, isRight, x, y) {
 
     OutputDebug("[EP-LvCtx] side=" side " item=" item " names=" _EP_JoinArr(names) "`n")
 
+    ; 앨범 패널(A): 항상 보기 메뉴 포함한 커스텀 메뉴 표시
+    if side = "A" {
+        _EP_ShowAlbumLvMenu(curDir, names, sx, sy)
+        return
+    }
     if names.Length > 0 {
         if _EP_ShowShellMenu(ctrl.Hwnd, side, curDir, names, sx, sy)
             return
@@ -860,9 +880,125 @@ _EP_HandleMenuChar(wParam, lParam, msg, hwnd) {
     }
 }
 
+; ── 앨범 ListView 전용 메뉴 (보기 + Shell) ─────────────────────
+_EP_ShowAlbumLvMenu(curDir, names, sx, sy) {
+    global _EP
+    m := Menu()
+    m.Add("보기", _EP_CreateViewMenu())
+    m.Add()
+    if names.Length > 0
+        m.Add("Shell 메뉴 열기", (*) => _EP_ShowShellMenu(UI.ExpLvA.Hwnd, "A", curDir, names, sx, sy))
+    m.Add("🔄 새로고침", (*) => _EP_CtxRefresh("A"))
+    if curDir != ""
+        m.Add("📁 탐색기에서 폴더 열기", (*) => OpenFolder(curDir))
+    m.Show(sx, sy)
+}
+
+; 앨범 ListView 보기 모드 변경 (LVM_SETVIEW + ImageList)
+_EP_SetExpLvAView(mode, iconSize) {
+    global _EP
+    ep := _EP.A
+    if ep.path = "" || !DirExist(ep.path)
+        return
+    ep.viewMode := mode
+    ep.iconSize := iconSize
+    _EP_PopulateList("A", ep.path)
+    _EP_SaveSettings()
+}
+
+; 지정 크기 ImageList 생성 (썸네일/Shell 아이콘)
+_EP_CreateExpIconList(size, basePath := "") {
+    global _EP
+    hIL := IL_Create(size, 32, false)
+    folderIdx := _EP_ShellIconToILSize(hIL, "folder", 0x10, size)
+    defaultIdx := _EP_ShellIconToILSize(hIL, "file", 0x80, size)
+    ; basePath가 있으면 listRows 기반으로 아이콘 추가
+    ep := _EP.A
+    extCache := Map()
+    for r in ep.listRows {
+        fullPath := basePath != "" ? basePath "\" r.name : ""
+        if r.isDir
+            r.iconIdx := folderIdx
+        else if fullPath != "" && _EP_IsImageFile(r.name) {
+            r.iconIdx := _EP_ThumbToIL(hIL, fullPath, size, defaultIdx)
+        } else {
+            pos := InStr(r.name, ".", 0, -1)
+            ext := pos ? StrLower(SubStr(r.name, pos)) : "."
+            if !extCache.Has(ext)
+                extCache[ext] := _EP_ShellIconToILSize(hIL, "*" ext, 0x80, size)
+            r.iconIdx := extCache[ext] > 0 ? extCache[ext] : defaultIdx
+        }
+    }
+    return hIL
+}
+
+_EP_IsImageFile(name) {
+    ext := StrLower(SubStr(name, InStr(name, ".", 0, -1)))
+    return ext = ".jpg" || ext = ".jpeg" || ext = ".png" || ext = ".heic"
+}
+
+; SHGetFileInfo + 지정 크기 → ImageList
+_EP_ShellIconToILSize(il, nameOrExt, fileAttr, size) {
+    sfi := Buffer(A_PtrSize + 8 + 520 + 160, 0)
+    flags := 0x100 | 0x10   ; SHGFI_ICON | USEFILEATTRIBUTES
+    if size <= 16
+        flags |= 0x01       ; SHGFI_SMALLICON
+    else
+        flags |= 0x00       ; SHGFI_LARGEICON
+    DllCall("shell32\SHGetFileInfoW", "WStr", nameOrExt, "UInt", fileAttr
+        , "Ptr", sfi, "UInt", sfi.Size, "UInt", flags, "Ptr")
+    hIcon := NumGet(sfi, 0, "Ptr")
+    if hIcon = 0
+        return 1
+    ; 아이콘 리사이즈: ImageList에 추가 시 크기 맞춤
+    idx := IL_Add(il, "HICON:" hIcon)
+    DllCall("DestroyIcon", "Ptr", hIcon)
+    return Max(1, idx)
+}
+
+; GDI+ 썸네일 → ImageList
+_EP_ThumbToIL(hIL, path, size, defaultIdx) {
+    hBmp := _GdipLoadRotated(path, size, size)
+    if !hBmp
+        return defaultIdx
+    idx := IL_Add(hIL, "HBITMAP:" hBmp)
+    DllCall("DeleteObject", "Ptr", hBmp)
+    return (idx > 0) ? idx : defaultIdx
+}
+
+; 보기 서브메뉴 생성 (체크 표시 포함)
+_EP_CreateViewMenu() {
+    global _EP
+    ep := _EP.A
+    viewMenu := Menu()
+    viewMenu.Add("아주 큰 아이콘 (256x256)", (*) => _EP_SetExpLvAView("icon", 256))
+    if (ep.viewMode = "icon" && ep.iconSize = 256)
+        viewMenu.Check("아주 큰 아이콘 (256x256)")
+    viewMenu.Add("큰 아이콘 (96x96)", (*) => _EP_SetExpLvAView("icon", 96))
+    if (ep.viewMode = "icon" && ep.iconSize = 96)
+        viewMenu.Check("큰 아이콘 (96x96)")
+    viewMenu.Add("중간 아이콘 (48x48)", (*) => _EP_SetExpLvAView("icon", 48))
+    if (ep.viewMode = "icon" && ep.iconSize = 48)
+        viewMenu.Check("중간 아이콘 (48x48)")
+    viewMenu.Add("작은 아이콘 (16x16)", (*) => _EP_SetExpLvAView("smallicon", 16))
+    if (ep.viewMode = "smallicon")
+        viewMenu.Check("작은 아이콘 (16x16)")
+    viewMenu.Add("자세히", (*) => _EP_SetExpLvAView("details", 0))
+    if (ep.viewMode = "details")
+        viewMenu.Check("자세히")
+    viewMenu.Add("목록", (*) => _EP_SetExpLvAView("list", 0))
+    if (ep.viewMode = "list")
+        viewMenu.Check("목록")
+    return viewMenu
+}
+
 ; ── 폴백 메뉴 (Shell 메뉴 실패 시 또는 빈 공간) ──────────────
 _EP_ShowFallbackMenu(side, curDir, sx, sy) {
     m := Menu()
+    if side = "A" {
+        m.Add("보기", _EP_CreateViewMenu())
+        m.Add()
+    }
     m.Add("🔄 새로고침", (*) => _EP_CtxRefresh(side))
     if curDir != ""
         m.Add("📁 탐색기에서 폴더 열기", (*) => OpenFolder(curDir))

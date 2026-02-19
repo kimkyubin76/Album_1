@@ -61,7 +61,8 @@ SortLV(col, asc) {
     for , idx in ST.Filtered {
         e   := ST.Frames[idx]
         stT := e.status = "MATCH" ? "MATCH" : "NOT FOUND"
-        aC  := e.status = "MATCH" ? e.albumNum : ""
+        ; 앨범 컬럼: MATCH→앨범번호|파일명, NOT FOUND→앨범번호만
+        aC  := _AlbumDisplay(e)
         r   := UI.LV.Add(, aC, stT, e.subdir, e.name)
         _SetSubItemIcon(r, 0, -2)                           ; 앨범 컬럼: I_IMAGENONE
         _SetSubItemIcon(r, 1, e.status = "MATCH" ? 0 : 1)  ; 상태 컬럼: 아이콘
@@ -154,6 +155,17 @@ _UpdateColHeaders(sortCol, sortAsc) {
     UI.LVHdr4.Text := (sortCol = 4) ? " 파일명" arrow : " 파일명"
 }
 
+; 앨범 컬럼 표시 문자열 (MATCH: 앨범번호|파일명, NOT FOUND: 앨범번호만)
+_AlbumDisplay(e) {
+    if (e.status != "MATCH")
+        return e.albumNum
+    if (e.HasProp("albumMatchFile") && e.albumMatchFile != "")
+        return e.albumNum " | " e.albumMatchFile
+    if (e.albumNum != "")
+        return e.albumNum " | (파일없음)"
+    return e.albumNum
+}
+
 _AlbumSortKey(e) {
     if e.status != "MATCH" || e.albumNum = "" || e.albumNum = "-"
         return "Z"
@@ -187,7 +199,7 @@ ApplyFilter(m) {
             continue
         ST.Filtered.Push(idx)
         stT := e.status = "MATCH" ? "MATCH" : "NOT FOUND"
-        aC  := e.status = "MATCH" ? e.albumNum : ""
+        aC  := _AlbumDisplay(e)
         r   := UI.LV.Add(, aC, stT, e.subdir, e.name)
         _SetSubItemIcon(r, 0, -2)                           ; 앨범 컬럼: I_IMAGENONE
         _SetSubItemIcon(r, 1, e.status = "MATCH" ? 0 : 1)  ; 상태 컬럼: 아이콘

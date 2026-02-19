@@ -95,16 +95,31 @@ OnScan(*) {
         }
         aNum := ""
         aRel := ""
+        albumMatchFile := ""
+        albumMatchPath := ""
         if mp.Length > 0 {
-            aRel := RelPath(mp[1], ST.AlbumPath)
+            matchedAlbumPath := mp[1]
+            aRel := RelPath(matchedAlbumPath, ST.AlbumPath)
             aNum := AlbumNum(aRel)
+            SplitPath(matchedAlbumPath, &albumMatchFile)
+            albumMatchPath := matchedAlbumPath
         }
         ST.Frames.Push({
             path: it.path, subdir: it.subdir, name: it.name,
             hash: h, status: s, matchPaths: mp,
-            albumNum: aNum, albumRel: aRel
+            albumNum: aNum, albumRel: aRel,
+            albumMatchFile: albumMatchFile, albumMatchPath: albumMatchPath
         })
-        albumCol := s = "MATCH" ? aNum : ""
+        ; MATCH: 앨범번호 | 파일명, NOT FOUND: 앨범번호만(빈값)
+        albumCol := ""
+        if s = "MATCH" {
+            if albumMatchFile != ""
+                albumCol := aNum " | " albumMatchFile
+            else if aNum != ""
+                albumCol := aNum " | (파일없음)"
+            else
+                albumCol := aNum
+        }
         stT := s = "MATCH" ? "MATCH" : "NOT FOUND"
         r := UI.LV.Add(, albumCol, stT, it.subdir, it.name)
         _SetSubItemIcon(r, 0, -2)                    ; 앨범 컬럼: I_IMAGENONE
