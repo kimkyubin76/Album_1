@@ -1,0 +1,507 @@
+; lib/GuiEvents.ahk
+; 의존: Globals.ahk, PathUtil.ahk, GuiLayout.ahk
+
+SwitchMode(m) {
+    global _LW, _LH
+    ST.Mode := m
+    isA := m = "A"
+    UI.BtnModeA.Text := isA  ? "▶ 자동(A)" : "자동(A)"
+    UI.BtnModeB.Text := !isA ? "▶ 수동(B)" : "수동(B)"
+    for n in ["LblRoot","EdtRoot","BtnRoot"]
+        UI.G[n].Visible := isA
+    for n in ["LblFrame","EdtFrame","BtnFrame","LblAlbum","EdtAlbum","BtnAlbum"]
+        UI.G[n].Visible := !isA
+    DoLayout(_LW, _LH)
+}
+
+OnBrowseRoot(*) {
+    UI.G.Opt("+OwnDialogs")
+    f := DirSelect(, 3, "[자동 모드] 루트 폴더를 선택하세요")
+    if !f
+        return
+    f := RTrim(f, "\")
+    ST.Root := f
+    UI.EdtRoot.Value := f
+}
+
+OnBrowseFrame(*) {
+    UI.G.Opt("+OwnDialogs")
+    f := DirSelect(, 3, "[수동 모드] 액자 폴더를 선택하세요")
+    if !f
+        return
+    f := RTrim(f, "\")
+    ST.FramePath := f
+    UI.EdtFrame.Value := f
+}
+
+OnBrowseAlbum(*) {
+    UI.G.Opt("+OwnDialogs")
+    f := DirSelect(, 3, "[수동 모드] 앨범 루트 폴더를 선택하세요")
+    if !f
+        return
+    f := RTrim(f, "\")
+    ST.AlbumPath := f
+    UI.EdtAlbum.Value := f
+}
+
+OnEditRoot(ctrl, *) {
+    val := Trim(ctrl.Value, ' "' . "`t`r`n")
+    val := RTrim(val, "\")
+    if !val
+        return
+    if DirExist(val) {
+        ST.Root := val
+        return
+    }
+    path := CleanPath(val)
+    if path && DirExist(path) {
+        ST.Root := path
+        ctrl.Value := path
+    }
+}
+
+OnEditFrame(ctrl, *) {
+    val := Trim(ctrl.Value, ' "' . "`t`r`n")
+    val := RTrim(val, "\")
+    if !val
+        return
+    if DirExist(val) {
+        ST.FramePath := val
+        return
+    }
+    path := CleanPath(val)
+    if path && DirExist(path) {
+        ST.FramePath := path
+        ctrl.Value := path
+    }
+}
+
+OnEditAlbum(ctrl, *) {
+    val := Trim(ctrl.Value, ' "' . "`t`r`n")
+    val := RTrim(val, "\")
+    if !val
+        return
+    if DirExist(val) {
+        ST.AlbumPath := val
+        return
+    }
+    path := CleanPath(val)
+    if path && DirExist(path) {
+        ST.AlbumPath := path
+        ctrl.Value := path
+    }
+}
+
+OnWM_DROPFILES(wParam, lParam, msg, hwnd) {
+    count := DllCall("Shell32\DragQueryFileW"
+        , "Ptr", wParam, "UInt", 0xFFFFFFFF, "Ptr", 0, "UInt", 0, "UInt")
+    if count < 1 {
+        DllCall("Shell32\DragFinish", "Ptr", wParam)
+        return 0
+    }
+    reqLen := DllCall("Shell32\DragQueryFileW"
+        , "Ptr", wParam, "UInt", 0, "Ptr", 0, "UInt", 0, "UInt")
+    bufChars := reqLen + 2
+    buf := Buffer(bufChars * 2, 0)
+    DllCall("Shell32\DragQueryFileW"
+        , "Ptr", wParam, "UInt", 0, "Ptr", buf, "UInt", bufChars, "UInt")
+    rawPath := StrGet(buf, "UTF-16")
+    pt := Buffer(8)
+    DllCall("Shell32\DragQueryPoint", "Ptr", wParam, "Ptr", pt)
+    dx := NumGet(pt, 0, "Int")
+    dy := NumGet(pt, 4, "Int")
+    DllCall("Shell32\DragFinish", "Ptr", wParam)
+    path := CleanPath(rawPath)
+    if !path {
+        ToolTip("⚠ 드롭 경로 인식 실패`n" rawPath)
+        SetTimer(() => ToolTip(), -3000)
+        return 0
+    }
+    if ST.Mode = "A" {
+        if _HitCtrl(UI.EdtRoot, dx, dy) || !_HitAnyRight(dx, dy) {
+            ST.Root := path
+            UI.EdtRoot.Value := path
+        }
+    } else {
+        if _HitCtrl(UI.EdtFrame, dx, dy) {
+            ST.FramePath := path
+            UI.EdtFrame.Value := path
+        } else if _HitCtrl(UI.EdtAlbum, dx, dy) {
+            ST.AlbumPath := path
+            UI.EdtAlbum.Value := path
+        } else if !ST.FramePath || ST.FramePath = "" {
+            ST.FramePath := path
+            UI.EdtFrame.Value := path
+        } else {
+            ST.AlbumPath := path
+            UI.EdtAlbum.Value := path
+        }
+    }
+    ToolTip("📂 " path)
+    SetTimer(() => ToolTip(), -1500)
+    return 0
+}
+
+_HitCtrl(ctrl, x, y) {
+    try {
+        ctrl.GetPos(&cx, &cy, &cw, &ch)
+        return x >= cx && x <= cx + cw && y >= cy && y <= cy + ch
+    }
+    return false
+}
+
+_HitAnyRight(x, y) {
+    try {
+        UI.PicF.GetPos(&px, &py, &pw, &ph)
+        if x >= px
+            return true
+    }
+    return false
+}
+
+; ============================================================
+;  스플리터 드래그 (SepSide: 좌/우)
+;
+;  ■ hit 판정 방식 변경 — HWND 의존 → 클라이언트 X 좌표 범위
+;    이유: ctrlHwnd 비교는 WS_EX_TRANSPARENT/빠른 이동 시 빗나갈 수 있음.
+;         X 좌표 기반은 어떤 자식 컨트롤이 포커스를 가져가도 정확히 동작.
+;
+;  hit area: [SIDE_W - HIT_EXTRA, SIDE_W + SEP_SIDE_W + HIT_EXTRA]
+;            SEP_SIDE_W=6, HIT_EXTRA=2 → 총 10px (보이는 라인=2px 유지)
+; ============================================================
+
+; 현재 X 좌표가 SepSide hit area 안에 있는지 판정
+_InSepSideHit(cx, cy) {
+    global SIDE_W
+    SEP_SIDE_W := 6
+    HIT_EXTRA  := 2
+    BodyTopY   := LAYOUT.HDR_H
+    return (cy >= BodyTopY)
+        && (cx >= SIDE_W - HIT_EXTRA)
+        && (cx <= SIDE_W + SEP_SIDE_W + HIT_EXTRA)
+}
+
+OnWM_LButtonDown(wParam, lParam, msg, hwnd) {
+    global DRAG, SIDE_W, _EPDrag
+    _GetMouseClientXY(&cx, &cy)
+
+    ; 탐색기 패널 스플리터 hit 테스트 (우선순위 높음 — 더 좁은 영역)
+    epSide := _EP_HitSplitter(cx, cy)
+    if epSide != "" {
+        _EP_StartDrag(epSide, cx)
+        return
+    }
+
+    ; 기존 사이드바 스플리터
+    if !_InSepSideHit(cx, cy)
+        return
+
+    DRAG.Active     := true
+    DRAG.Target     := "SIDE"
+    DRAG.StartX     := cx
+    DRAG.StartSideW := SIDE_W
+    DRAG.LastT      := 0
+
+    _SetSplitterLineColor(UI.SepSideLine, LINE_A)
+    DllCall("SetCapture", "Ptr", UI.G.Hwnd)
+}
+
+OnWM_LButtonUp(wParam, lParam, msg, hwnd) {
+    global DRAG, _EPDrag
+
+    ; 탐색기 패널 스플리터 드래그 종료
+    if _EPDrag.Active {
+        _EP_EndDrag()
+        return
+    }
+
+    if !DRAG.Active
+        return
+    DRAG.Active    := false
+    DRAG.Target    := ""
+    DRAG.JustEnded := true
+    DllCall("ReleaseCapture")
+    _SetSplitterLineColor(UI.SepSideLine, LINE_P)
+    DoLayout(_LW, _LH)
+    try SaveUiSettings()
+}
+
+OnWM_MouseMove(wParam, lParam, msg, hwnd) {
+    global DRAG, SIDE_W, _LW, _LH, _EPDrag
+
+    ; 탐색기 패널 스플리터 드래그 중
+    if _EPDrag.Active {
+        _GetMouseClientXY(&cx, &cy)
+        _EP_OnDragMove(cx)
+        return
+    }
+
+    ; 1) Hover 시각 라인 색 변경 — 커서 제어는 OnWM_SetCursor가 담당
+    if !DRAG.Active {
+        _GetMouseClientXY(&cx, &cy)
+        static _ls := -1
+        sidHov := _InSepSideHit(cx, cy) ? 1 : 0
+        if DRAG.JustEnded {
+            DRAG.JustEnded := false
+            _ls := -1
+        }
+        if sidHov != _ls {
+            _ls := sidHov
+            _SetSplitterLineColor(UI.SepSideLine, sidHov ? LINE_A : LINE_P)
+        }
+        return
+    }
+
+    ; 2) 사이드바 드래그 중 실시간 리사이즈 — throttle 16ms (~60fps)
+    t := A_TickCount
+    if (t - DRAG.LastT < 16)
+        return
+    DRAG.LastT := t
+
+    _GetMouseClientXY(&cx, &cy)
+    dx := cx - DRAG.StartX
+
+    SEP_SIDE_W := 6
+    LeftMinW  := 260
+    RightMinW := 720
+    maxLeft := _LW - RightMinW - SEP_SIDE_W
+    if (maxLeft < LeftMinW)
+        maxLeft := LeftMinW
+    newW := _Clamp(DRAG.StartSideW + dx, LeftMinW, maxLeft)
+    if (newW != SIDE_W) {
+        SIDE_W := newW
+        DoLayout(_LW, _LH)
+    }
+}
+
+; ============================================================
+;  WM_SETCURSOR (0x0020) 핸들러
+;
+;  원리: Windows는 마우스 이동마다 WM_SETCURSOR를 해당 창에 보내고,
+;        DefWindowProc가 이를 처리하며 커서를 클래스 기본값(화살표)으로 리셋.
+;        WM_MOUSEMOVE에서 SetCursor를 호출해도 곧바로 덮어씌워지는 이유.
+;
+;  해결: WM_SETCURSOR를 가로채서 return 1 → DefWindowProc 호출 차단.
+;        우선순위: 드래그 중 > hit zone hover > 기본 처리
+; ============================================================
+
+OnWM_SetCursor(wParam, lParam, msg, hwnd) {
+    global DRAG, SIDE_W, _EPDrag
+
+    ; 탐색기 패널 스플리터 드래그 중 또는 호버
+    if _EPDrag.Active {
+        DllCall("SetCursor", "Ptr", DllCall("LoadCursor", "Ptr", 0, "Ptr", 32644, "Ptr"))
+        return 1
+    }
+
+    ; 사이드바 드래그 중
+    if DRAG.Active {
+        DllCall("SetCursor", "Ptr", DllCall("LoadCursor", "Ptr", 0, "Ptr", 32644, "Ptr"))
+        return 1
+    }
+
+    _GetMouseClientXY(&cx, &cy)
+
+    ; 탐색기 패널 스플리터 hover
+    if _EP_HitSplitter(cx, cy) != "" {
+        DllCall("SetCursor", "Ptr", DllCall("LoadCursor", "Ptr", 0, "Ptr", 32644, "Ptr"))
+        return 1
+    }
+
+    ; 사이드바 스플리터 hover
+    if _InSepSideHit(cx, cy) {
+        DllCall("SetCursor", "Ptr", DllCall("LoadCursor", "Ptr", 0, "Ptr", 32644, "Ptr"))
+        return 1
+    }
+}
+
+_Clamp(v, mn, mx) {
+    return Max(mn, Min(mx, v))
+}
+
+; ============================================================
+;  ListView 컬럼 폭 변경 감지 — WM_NOTIFY / HDN_ENDTRACK(W)
+;  HDN_ENDTRACKW(-327): 사용자가 헤더 분리선 드래그를 완료한 시점에 1회 발화
+;  → SetTimer로 300ms 디바운스 후 _SaveLVColWidths() 1회 호출
+; ============================================================
+
+; LV hwnd 변경 감지용 (되돌아감 추적)
+global _LV_LastHwnd := 0
+global _NM_CUSTOMDRAW_Count := 0
+
+; 스캔/필터/정렬/리프레시 시 호출 — pill 배지 유지 보장
+EnsureCustomDrawBound() {
+    try DllCall("InvalidateRect", "Ptr", UI.LV.Hwnd, "Ptr", 0, "Int", 1)
+}
+
+OnWM_NOTIFY(wParam, lParam, msg, hwnd) {
+    global _LV_LastHwnd
+    code := NumGet(lParam, A_PtrSize * 2, "Int")
+    hwndFrom := NumGet(lParam, 0, "Ptr")
+
+    ; HDN_ENDTRACKW = -327, HDN_ENDTRACK(ANSI) = -307
+    if code = -327 || code = -307 {
+        try {
+            hdrHwnd := SendMessage(0x101F, 0, 0, UI.LV)
+            if hwndFrom = hdrHwnd
+                SetTimer(_SaveLVColWidths, -300)
+        }
+    }
+}
+
+; ── 리사이즈 완료 시 pill 강제 리페인트 ──
+OnWM_EXITSIZEMOVE(wParam, lParam, msg, hwnd) {
+    SetTimer(_ForceRepaintLV, -30)
+}
+
+_ForceRepaintLV() {
+    try {
+        h := UI.LV.Hwnd
+        cnt := ST.Filtered.Length
+        if cnt > 0
+            DllCall("SendMessageW", "Ptr", h, "UInt", 0x1015, "Ptr", 0, "Ptr", cnt - 1, "Ptr")
+        DllCall("RedrawWindow", "Ptr", h, "Ptr", 0, "Ptr", 0
+            , "UInt", 0x0501)   ; RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN
+    }
+}
+
+; ============================================================
+;  NM_CUSTOMDRAW — 상태 컬럼(column 0) pill 배지 렌더링
+;  ★ 핵심 규칙: 핸들러 내부에서 UI.LV에 AHK 메시지를 보내면 안 됨 (재진입 방지)
+;    → GetText 금지, AHK SendMessage 금지, DllCall("SendMessageW",...) 만 사용
+;  MATCH: #49B56A 연녹 / NOT FOUND: #E55353 빨강 / text: white
+; ============================================================
+
+_LV_CustomDraw(lParam) {
+    static is64 := A_PtrSize = 8
+    static O_STAGE := is64 ? 24 : 12
+    static O_HDC   := is64 ? 32 : 16
+    static O_ITEM  := is64 ? 56 : 36
+    static O_SUB   := is64 ? 88 : 56
+
+    stage := NumGet(lParam, O_STAGE, "UInt")
+
+    if stage = 1          ; CDDS_PREPAINT
+        return 0x20       ; CDRF_NOTIFYITEMDRAW
+    if stage = 0x10001 {  ; CDDS_ITEMPREPAINT
+        ; ★ 기본 텍스트 색을 흰색(배경과 동일)으로 — column 0 빈 문자열 미표시 보장
+        NumPut("UInt", 0x00FFFFFF, lParam, is64 ? 72 : 44)  ; clrText = white
+        return 0x22       ; CDRF_NOTIFYSUBITEMDRAW | CDRF_NEWFONT
+    }
+    if stage != 0x30001   ; CDDS_SUBITEMPREPAINT only
+        return 0
+
+    iSub := NumGet(lParam, O_SUB, "Int")
+    if iSub != 0
+        return 0          ; column 0 only
+
+    hdc  := NumGet(lParam, O_HDC, "Ptr")
+    iRow := NumGet(lParam, O_ITEM, "Ptr")
+    row  := Integer(iRow) + 1
+
+    if iRow < 0 || row < 1
+        return 0
+
+    try lvH := UI.LV.Hwnd
+    catch
+        return 0
+
+    ; ── column 0 rect ──
+    global _LV_Col0W
+    rcBuf := Buffer(16, 0)
+    NumPut("Int", 0, rcBuf, 0)
+    NumPut("Int", 0, rcBuf, 4)
+    DllCall("SendMessageW", "Ptr", lvH, "UInt", 0x1038, "Ptr", iRow, "Ptr", rcBuf, "Ptr")
+    rowL  := NumGet(rcBuf, 0, "Int")
+    rowT  := NumGet(rcBuf, 4, "Int")
+    rowB  := NumGet(rcBuf, 12, "Int")
+    col0W := _LV_Col0W > 10 ? _LV_Col0W : 76
+    rowR  := rowL + col0W
+    colW  := col0W
+    cellH := rowB - rowT
+
+    if colW < 10 || cellH < 4
+        return 4  ; CDRF_SKIPDEFAULT
+
+    ; ── 상태 텍스트 ──
+    text := ""
+    if HasProp(ST, "RowState") && row <= ST.RowState.Length
+        text := ST.RowState[row]
+    if !text && HasProp(ST, "Filtered") && row <= ST.Filtered.Length && HasProp(ST, "Frames")
+        try text := ST.Frames[ST.Filtered[row]].status = "MATCH" ? "MATCH" : "NOT FOUND"
+    if InStr(text, "MATCH")
+        text := "✔ MATCH"
+    else if InStr(text, "NOT")
+        text := "✕ NOT FOUND"
+    else
+        return 4  ; CDRF_SKIPDEFAULT (빈 셀 유지)
+
+    bgClr := InStr(text, "MATCH") ? 0x006AB549 : 0x005353E5
+
+    ; ── 렌더링 ──
+    saved := DllCall("SaveDC", "Ptr", hdc, "Int")
+    hRgn := DllCall("CreateRectRgn", "Int", rowL, "Int", rowT, "Int", rowR, "Int", rowB, "Ptr")
+    DllCall("SelectClipRgn", "Ptr", hdc, "Ptr", hRgn)
+
+    ; 셀 클리어
+    hBgBr := DllCall("CreateSolidBrush", "UInt", 0x00FFFFFF, "Ptr")
+    bgRc := Buffer(16, 0)
+    NumPut("Int", rowL, bgRc, 0),  NumPut("Int", rowT, bgRc, 4)
+    NumPut("Int", rowR, bgRc, 8),  NumPut("Int", rowB, bgRc, 12)
+    DllCall("FillRect", "Ptr", hdc, "Ptr", bgRc, "Ptr", hBgBr)
+    DllCall("DeleteObject", "Ptr", hBgBr)
+
+    ; pill
+    padX := 10, padY := 4
+    sz := Buffer(8, 0)
+    DllCall("GetTextExtentPoint32W", "Ptr", hdc, "WStr", text, "Int", StrLen(text), "Ptr", sz)
+    tw := NumGet(sz, 0, "Int"), th := NumGet(sz, 4, "Int")
+    pillW := Min(tw + padX * 2, Max(24, colW - 8))
+    pillH := Min(th + padY * 2, Max(16, cellH - 6))
+    pillX := rowL + Integer((colW - pillW) / 2)
+    pillY := rowT + Integer((cellH - pillH) / 2)
+    rad   := Integer(pillH / 2)
+
+    if pillW >= 4 && pillH >= 4 {
+        hBr := DllCall("CreateSolidBrush", "UInt", bgClr, "Ptr")
+        hPn := DllCall("CreatePen", "Int", 0, "Int", 0, "UInt", bgClr, "Ptr")
+        DllCall("SelectObject", "Ptr", hdc, "Ptr", hBr)
+        DllCall("SelectObject", "Ptr", hdc, "Ptr", hPn)
+        DllCall("RoundRect", "Ptr", hdc
+            , "Int", pillX, "Int", pillY
+            , "Int", pillX + pillW, "Int", pillY + pillH
+            , "Int", rad, "Int", rad)
+        DllCall("SetBkMode", "Ptr", hdc, "Int", 1)
+        DllCall("SetTextColor", "Ptr", hdc, "UInt", 0x00FFFFFF)
+        trc := Buffer(16, 0)
+        NumPut("Int", pillX, trc, 0),          NumPut("Int", pillY, trc, 4)
+        NumPut("Int", pillX + pillW, trc, 8),  NumPut("Int", pillY + pillH, trc, 12)
+        DllCall("DrawTextW", "Ptr", hdc, "WStr", text, "Int", -1, "Ptr", trc, "UInt", 0x0825)
+        DllCall("DeleteObject", "Ptr", hBr)
+        DllCall("DeleteObject", "Ptr", hPn)
+    }
+
+    DllCall("RestoreDC", "Ptr", hdc, "Int", saved)
+    DllCall("DeleteObject", "Ptr", hRgn)
+    return 4   ; CDRF_SKIPDEFAULT
+}
+
+_GetMouseClientXY(&cx, &cy) {
+    CoordMode("Mouse", "Screen")
+    MouseGetPos(&sx, &sy)
+    pt := Buffer(8, 0)
+    NumPut("Int", sx, pt, 0)
+    NumPut("Int", sy, pt, 4)
+    DllCall("ScreenToClient", "Ptr", UI.G.Hwnd, "Ptr", pt)
+    cx := NumGet(pt, 0, "Int")
+    cy := NumGet(pt, 4, "Int")
+}
+
+; 스플리터 시각 라인 색 동적 변경 (Primary ↔ Accent) + 즉시 리페인트
+; ctrl.Opt() → AHK 내부 WM_CTLCOLORSTATIC 브러시 갱신 → Redraw()로 반영
+_SetSplitterLineColor(ctrl, hex) {
+    try {
+        ctrl.Opt("Background" . hex)
+        ctrl.Redraw()
+    }
+}
