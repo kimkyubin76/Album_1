@@ -30,6 +30,4 @@ LoadFilterSettings()
 LoadUiSettings()
 LoadLvColWidths()
 BuildGui()
-ST.Root := "P:\Theday_Work\1_디자인\샘플\성장-서연우(9009)-2월12일까지-잔치3월28일_셀렉완"
-UI.EdtRoot.Value := ST.Root
 return

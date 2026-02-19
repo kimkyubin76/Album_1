@@ -67,29 +67,28 @@ BuildGui() {
 
     UI.GrpSum := g.Add("Text", "x0 y80 w10 h20 +0x200 c555555 BackgroundF5F4F0", "  스캔 전")
 
-    ; ── ListView (네이티브 헤더 — 구분선 + 드래그로 너비 조정) ──
+    ; ── 커스텀 헤더 (배경 진한색 + 텍스트 사이 1px 갭 → 구분선 효과) ──
+    UI.LVHdrBg := g.Add("Text", "x0 y100 w10 h24 Background8899AA")
+    g.SetFont("s9 bold", "맑은 고딕")
+    UI.LVHdr1 := g.Add("Text", "x0 y100 w58 h24 +0x200 +Center BackgroundDCE6F1 c374151", "앨범")
+    UI.LVHdr2 := g.Add("Text", "x58 y100 w58 h24 +0x200 +Center BackgroundDCE6F1 c374151", "상태")
+    UI.LVHdr3 := g.Add("Text", "x116 y100 w60 h24 +0x200 BackgroundDCE6F1 c374151", " 사이즈폴더")
+    UI.LVHdr4 := g.Add("Text", "x176 y100 w60 h24 +0x200 BackgroundDCE6F1 c374151", " 파일명")
+    g.SetFont("s9 norm", "맑은 고딕")
+    ; 하단 구분선
+    UI.LVHdrSep := g.Add("Text", "x0 y124 w10 h1 Background9DC3E6")
+    ; 클릭 이벤트
+    UI.LVHdr1.OnEvent("Click", (*) => OnLVColClick(UI.LV, 1))
+    UI.LVHdr2.OnEvent("Click", (*) => OnLVColClick(UI.LV, 2))
+    UI.LVHdr3.OnEvent("Click", (*) => OnLVColClick(UI.LV, 3))
+    UI.LVHdr4.OnEvent("Click", (*) => OnLVColClick(UI.LV, 4))
+
+    ; ── ListView (헤더 숨김 — 커스텀 헤더 사용) ──
     UI.LV := g.Add("ListView"
-        , "x0 y125 w10 h10 +LV0x10020 +Grid +Theme +Hdr -Multi BackgroundWhite"
+        , "x0 y125 w10 h10 +LV0x10020 +Grid NoSortHdr -Hdr -Multi BackgroundWhite"
         , ["앨범", "상태", "사이즈폴더", "파일명"])
-    UI.LV.Opt("+Hdr")
     UI.LV.OnEvent("ItemFocus", OnItemFocus)
     UI.LV.OnEvent("ColClick",  OnLVColClick)
-
-    ; 헤더 컨트롤에 HDS_BUTTONS 스타일 적용 (구분선 + 클릭 가능 + 드래그로 너비 조정)
-    HDR_HWND := SendMessage(0x101F, 0, 0, UI.LV)  ; LVM_GETHEADER
-    if HDR_HWND {
-        style := DllCall("GetWindowLong", "Ptr", HDR_HWND, "Int", -16, "Int")
-        style |= 0x0002  ; HDS_BUTTONS
-        DllCall("SetWindowLong", "Ptr", HDR_HWND, "Int", -16, "Int", style)
-    }
-
-    ; 각 컬럼 초기 너비 강제 설정
-    if !LV_COL_W.Length
-        global LV_COL_W := [80, 80, 200, 200]
-    UI.LV.ModifyCol(1, 80)   ; 앨범
-    UI.LV.ModifyCol(2, 80)   ; 상태
-    UI.LV.ModifyCol(3, 200)  ; 사이즈폴더
-    UI.LV.ModifyCol(4, 200)  ; 파일명
 
     ; 포커스 점선 숨김
     DllCall("SendMessage", "Ptr", UI.LV.Hwnd, "UInt", 0x0127, "Ptr", 0x10001, "Ptr", 0)

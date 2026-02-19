@@ -91,12 +91,34 @@ DoLayout(w, h) {
 
     UI.GrpSum.Move(0, BodyTopY + TAB_H, SIDE_W, GRP_H)
 
+    HDR_CUSTOM_H := 24
+    HDR_SEP_H    := 1
     lvHdrTop     := BodyTopY + TAB_H + GRP_H
+    lvTop        := lvHdrTop + HDR_CUSTOM_H + HDR_SEP_H
     lvBot        := BodyBottomY - HINT_H
-    lvH          := Max(80, lvBot - lvHdrTop)
+    lvH          := Max(80, lvBot - lvTop)
 
-    ; ListView (네이티브 헤더 포함, lvHdrTop부터 시작)
-    UI.LV.Move(0, lvHdrTop, SIDE_W, lvH)
+    ; 커스텀 헤더 배경 (진한색 → 텍스트 사이 1px 갭에서 구분선으로 보임)
+    UI.LVHdrBg.Move(0, lvHdrTop, SIDE_W, HDR_CUSTOM_H)
+
+    ; 커스텀 헤더 컬럼 위치 — 각 컬럼 사이 1px 갭 (배경색이 구분선 역할)
+    cols := _GetLVColWidths(SIDE_W)
+    c1 := cols[1], c2 := cols[2], c3 := cols[3], c4 := cols[4]
+    g1 := 1  ; 갭 폭
+    UI.LVHdr1.Move(0, lvHdrTop, c1 - g1, HDR_CUSTOM_H)
+    UI.LVHdr2.Move(c1, lvHdrTop, c2 - g1, HDR_CUSTOM_H)
+    UI.LVHdr3.Move(c1 + c2, lvHdrTop, c3 - g1, HDR_CUSTOM_H)
+    UI.LVHdr4.Move(c1 + c2 + c3, lvHdrTop, c4, HDR_CUSTOM_H)
+
+    ; 하단 구분선
+    UI.LVHdrSep.Move(0, lvHdrTop + HDR_CUSTOM_H, SIDE_W, HDR_SEP_H)
+
+    ; 헤더 경계 위치 캐시 (컬럼 드래그 리사이즈용)
+    global _LVHdrTop := lvHdrTop
+    global _LVHdrH   := HDR_CUSTOM_H
+
+    ; ListView
+    UI.LV.Move(0, lvTop, SIDE_W, lvH)
 
     UI.LVHint.Move(0, lvBot, SIDE_W, HINT_H)
     SEP_SIDE_W := 6

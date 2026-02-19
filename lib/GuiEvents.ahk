@@ -181,9 +181,38 @@ _InSepSideHit(cx, cy) {
         && (cx <= SIDE_W + SEP_SIDE_W + HIT_EXTRA)
 }
 
+; 헤더 컬럼 경계 hit 판정 — 경계 ±3px 이내면 컬럼 인덱스(1~3) 반환, 아니면 0
+_HitLVColBorder(cx, cy) {
+    global _LVHdrTop, _LVHdrH, LV_COL_W
+    if (cy < _LVHdrTop || cy > _LVHdrTop + _LVHdrH)
+        return 0
+    cols := _GetLVColWidths(SIDE_W)
+    HIT := 4
+    bx := 0
+    Loop 3 {
+        bx += cols[A_Index]
+        if (cx >= bx - HIT && cx <= bx + HIT)
+            return A_Index
+    }
+    return 0
+}
+
 OnWM_LButtonDown(wParam, lParam, msg, hwnd) {
-    global DRAG, SIDE_W, _EPDrag
+    global DRAG, SIDE_W, _EPDrag, COLDRAG
     _GetMouseClientXY(&cx, &cy)
+
+    ; 헤더 컬럼 경계 드래그 시작
+    colIdx := _HitLVColBorder(cx, cy)
+    if colIdx > 0 {
+        cols := _GetLVColWidths(SIDE_W)
+        COLDRAG.Active := true
+        COLDRAG.ColIdx := colIdx
+        COLDRAG.StartX := cx
+        COLDRAG.StartWidths := [cols[1], cols[2], cols[3], cols[4]]
+        COLDRAG.LastT := 0
+        DllCall("SetCapture", "Ptr", UI.G.Hwnd)
+        return
+    }
 
     ; 탐색기 패널 스플리터 hit 테스트 (우선순위 높음 — 더 좁은 영역)
     epSide := _EP_HitSplitter(cx, cy)
@@ -207,7 +236,15 @@ OnWM_LButtonDown(wParam, lParam, msg, hwnd) {
 }
 
 OnWM_LButtonUp(wParam, lParam, msg, hwnd) {
-    global DRAG, _EPDrag
+    global DRAG, _EPDrag, COLDRAG
+
+    ; 헤더 컬럼 드래그 종료
+    if COLDRAG.Active {
+        COLDRAG.Active := false
+        DllCall("ReleaseCapture")
+        SaveLvColWidths()
+        return
+    }
 
     ; 탐색기 패널 스플리터 드래그 종료
     if _EPDrag.Active {
@@ -227,7 +264,28 @@ OnWM_LButtonUp(wParam, lParam, msg, hwnd) {
 }
 
 OnWM_MouseMove(wParam, lParam, msg, hwnd) {
-    global DRAG, SIDE_W, _LW, _LH, _EPDrag
+    global DRAG, SIDE_W, _LW, _LH, _EPDrag, COLDRAG, LV_COL_W
+
+    ; 헤더 컬럼 드래그 중
+    if COLDRAG.Active {
+        t := A_TickCount
+        if (t - COLDRAG.LastT < 16)
+            return
+        COLDRAG.LastT := t
+        _GetMouseClientXY(&cx, &cy)
+        dx := cx - COLDRAG.StartX
+        ci := COLDRAG.ColIdx
+        sw := COLDRAG.StartWidths
+        MIN_COL := 30
+        newW := Max(MIN_COL, sw[ci] + dx)
+        delta := newW - sw[ci]
+        nextW := Max(MIN_COL, sw[ci + 1] - delta)
+        LV_COL_W := [sw[1], sw[2], sw[3], sw[4]]
+        LV_COL_W[ci]     := newW
+        LV_COL_W[ci + 1] := nextW
+        DoLayout(_LW, _LH)
+        return
+    }
 
     ; 탐색기 패널 스플리터 드래그 중
     if _EPDrag.Active {
@@ -286,7 +344,13 @@ OnWM_MouseMove(wParam, lParam, msg, hwnd) {
 ; ============================================================
 
 OnWM_SetCursor(wParam, lParam, msg, hwnd) {
-    global DRAG, SIDE_W, _EPDrag
+    global DRAG, SIDE_W, _EPDrag, COLDRAG
+
+    ; 헤더 컬럼 드래그 중
+    if COLDRAG.Active {
+        DllCall("SetCursor", "Ptr", DllCall("LoadCursor", "Ptr", 0, "Ptr", 32644, "Ptr"))
+        return 1
+    }
 
     ; 탐색기 패널 스플리터 드래그 중 또는 호버
     if _EPDrag.Active {
@@ -301,6 +365,12 @@ OnWM_SetCursor(wParam, lParam, msg, hwnd) {
     }
 
     _GetMouseClientXY(&cx, &cy)
+
+    ; 헤더 컬럼 경계 hover
+    if _HitLVColBorder(cx, cy) > 0 {
+        DllCall("SetCursor", "Ptr", DllCall("LoadCursor", "Ptr", 0, "Ptr", 32644, "Ptr"))
+        return 1
+    }
 
     ; 탐색기 패널 스플리터 hover
     if _EP_HitSplitter(cx, cy) != "" {

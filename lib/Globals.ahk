@@ -49,6 +49,10 @@ global RIGHT_ORIG_W := 0
 ; 스플리터 드래그 상태
 global DRAG := { Active:false, Target:"", StartX:0, StartSideW:0, StartOrigW:0, LastT:0, JustEnded:false }
 global _LV_Col0W := 76   ; CustomDraw용 column 0 폭 캐시
+; 헤더 컬럼 드래그 리사이즈 상태
+global _LVHdrTop := 0
+global _LVHdrH   := 24
+global COLDRAG := { Active:false, ColIdx:0, StartX:0, StartWidths:[], LastT:0 }
 
 ; ── 레이아웃 기준선 상수 (BaseY 단일화용) ────────────────────────────────────
 ; BodyTopY = HDR_H, BodyBottomY = BaseY - 1, BaseY = 바닥선(1px) Y
