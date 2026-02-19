@@ -17,7 +17,8 @@
 
 global _EP := {
     F: { path: "", treeW: 180, bounds: {x:0,y:0,w:400,h:200} },
-    A: { path: "", treeW: 180, bounds: {x:0,y:0,w:400,h:200} }
+    A: { path: "", treeW: 180, bounds: {x:0,y:0,w:400,h:200}
+        , listRows: [], sortCol: 1, sortAsc: true }
 }
 
 global _EPDrag := { Active: false, Side: "", StartX: 0, StartTreeW: 0, LastT: 0 }
@@ -60,7 +61,7 @@ ExpPaneInit() {
     ; ── 앨범 패널 (A) ──────────────────────────────────────────────
     UI.ExpTvA := g.Add("TreeView", "x0 y0 w10 h10 +HScroll BackgroundWhite vExpTvA")
     UI.ExpLvA := g.Add("ListView"
-        , "x0 y0 w10 h10 +LV0x20 NoSortHdr BackgroundWhite vExpLvA"
+        , "x0 y0 w10 h10 +LV0x20 BackgroundWhite vExpLvA"
         , ["이름", "크기", "수정일"])
     UI.ExpSplitA := g.Add("Text", "x0 y0 w4 h10 BackgroundE0E0E0 vExpSplitA", "")
 
@@ -71,6 +72,7 @@ ExpPaneInit() {
     UI.ExpTvA.OnEvent("ItemExpand", (ctrl, item, expanding) => _EP_OnTreeExpand("A", ctrl, item, expanding))
     UI.ExpTvA.OnEvent("ContextMenu", (ctrl, item, isRight, x, y) => _EP_OnTreeCtxMenu("A", ctrl, item, isRight, x, y))
     UI.ExpLvA.OnEvent("DoubleClick", (ctrl, row) => _EP_OnListDbl("A", ctrl, row))
+    UI.ExpLvA.OnEvent("ColClick", (ctrl, col) => _EP_OnExpLvAColClick(ctrl, col))
     UI.ExpLvA.OnEvent("ContextMenu", (ctrl, item, isRight, x, y) => _EP_OnLvCtxMenu("A", ctrl, item, isRight, x, y))
 
     _EP_SetTransparent(UI.ExpSplitA)
@@ -329,36 +331,51 @@ _EP_OnTreeExpand(side, ctrl, item, expanding) {
 ; ============================================================
 
 _EP_PopulateList(side, dirPath) {
-    global _EP_FolderIdx_LV
+    global _EP_FolderIdx_LV, _EP
     lv := (side = "F") ? UI.ExpLvF : UI.ExpLvA
     lv.Delete()
     lv.Opt("-Redraw")
 
+    rows := []
     fileCount := 0
     dirCount  := 0
 
-    ; 1) 폴더 먼저 (탐색기 스타일, 노란 폴더 아이콘)
+    ; 1) 폴더 수집
     try {
         Loop Files, dirPath "\*", "D" {
             name := A_LoopFileName
             if SubStr(name, 1, 1) = "."
                 continue
-            lv.Add("Icon" _EP_FolderIdx_LV, name, "", _EP_FormatDate(A_LoopFileTimeModified))
+            rows.Push({name: name, size: "", date: _EP_FormatDate(A_LoopFileTimeModified), isDir: true, iconIdx: _EP_FolderIdx_LV})
             dirCount++
         }
     }
 
-    ; 2) 파일 (확장자별 Shell 아이콘)
+    ; 2) 파일 수집
     try {
         Loop Files, dirPath "\*", "F" {
             name := A_LoopFileName
             SplitPath(name, , , &ext)
             iconIdx := _EP_GetExtIcon("." ext)
             size := _EP_FormatSize(A_LoopFileSize)
-            lv.Add("Icon" iconIdx, name, size, _EP_FormatDate(A_LoopFileTimeModified))
+            rows.Push({name: name, size: size, date: _EP_FormatDate(A_LoopFileTimeModified), isDir: false, iconIdx: iconIdx})
             fileCount++
         }
     }
+
+    ; 3) 앨범 패널(A)일 때 정렬 후 저장
+    if side = "A" {
+        ep := _EP.A
+        ep.listRows := rows
+        _EP_SortExpListRows(rows, ep.sortCol, ep.sortAsc)
+        _EP_UpdateExpLvAHeader(ep.sortCol, ep.sortAsc)
+    } else {
+        ; 액자 패널(F): 폴더→파일 순 유지 (Loop Files 순서)
+    }
+
+    ; 4) LV에 추가
+    for r in rows
+        lv.Add("Icon" r.iconIdx, r.name, r.size, r.date)
 
     lv.ModifyCol(1, "AutoHdr")
     lv.ModifyCol(2, 70)
@@ -367,6 +384,85 @@ _EP_PopulateList(side, dirPath) {
 
     stat := (side = "F") ? UI.ExpStatF : UI.ExpStatA
     stat.Text := "  " (dirCount + fileCount) "개 항목 (폴더 " dirCount ", 파일 " fileCount ")"
+}
+
+; ── 앨범 ListView "이름" 컬럼 클릭: 오름차순/내림차순 토글 ──
+_EP_OnExpLvAColClick(ctrl, col) {
+    global _EP
+    if col != 1
+        return
+    ep := _EP.A
+    if ep.path = "" || ep.listRows.Length = 0
+        return
+    ep.sortAsc := !ep.sortAsc
+    _EP_SortExpListRows(ep.listRows, 1, ep.sortAsc)
+    _EP_UpdateExpLvAHeader(1, ep.sortAsc)
+    ; LV 다시 그리기
+    lv := UI.ExpLvA
+    lv.Opt("-Redraw")
+    lv.Delete()
+    for r in ep.listRows
+        lv.Add("Icon" r.iconIdx, r.name, r.size, r.date)
+    lv.ModifyCol(1, "AutoHdr")
+    lv.ModifyCol(2, 70)
+    lv.ModifyCol(3, 120)
+    lv.Opt("+Redraw")
+}
+
+; 앨범 ListView 헤더에 ▲/▼ 표시
+_EP_UpdateExpLvAHeader(sortCol, sortAsc) {
+    arrow := sortAsc ? " ▲" : " ▼"
+    baseNames := ["이름", "크기", "수정일"]
+    Loop 3 {
+        name := baseNames[A_Index]
+        if A_Index = sortCol
+            name .= arrow
+        UI.ExpLvA.ModifyCol(A_Index, , name)
+    }
+}
+
+; Explorer ListView 행 정렬 (폴더 먼저, 숫자→문자)
+_EP_SortExpListRows(rows, sortCol, sortAsc) {
+    n := rows.Length
+    Loop n - 1 {
+        i := A_Index + 1
+        temp := rows[i]
+        j := i - 1
+        while j >= 1 && _EP_CompareExpRow(rows[j], temp, sortCol, sortAsc) > 0 {
+            rows[j + 1] := rows[j]
+            j--
+        }
+        rows[j + 1] := temp
+    }
+}
+
+_EP_CompareExpRow(a, b, col, asc) {
+    diff := 0
+    if col = 1 {
+        ; 폴더 먼저, 그 다음 이름
+        if a.isDir != b.isDir
+            diff := a.isDir ? -1 : 1
+        else
+            diff := _EP_CompareExpName(a.name, b.name)
+    } else if col = 2 {
+        diff := StrCompare(a.size, b.size)
+    } else if col = 3 {
+        diff := StrCompare(a.date, b.date)
+    }
+    return asc ? diff : -diff
+}
+
+; 이름 비교: 숫자(01~99) → 숫자 크기순, 문자 → 가나다순
+_EP_CompareExpName(a, b) {
+    aIsNum := RegExMatch(a, "^\d{1,2}$") && Integer(a) >= 1 && Integer(a) <= 99
+    bIsNum := RegExMatch(b, "^\d{1,2}$") && Integer(b) >= 1 && Integer(b) <= 99
+    if aIsNum && bIsNum
+        return Integer(a) - Integer(b)
+    if aIsNum
+        return -1
+    if bIsNum
+        return 1
+    return DllCall("shlwapi\StrCmpLogicalW", "WStr", a, "WStr", b, "Int")
 }
 
 ; ListView 더블클릭: 폴더 진입 / 파일 열기

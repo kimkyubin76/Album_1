@@ -57,24 +57,34 @@ GatherFrame(rootUnused := "") {
     folders := _SortPathsByFolderName(folders)
     for folderPath in folders {
         SplitPath(folderPath, &folderName)
-        for ext in CFG.Ext {
-            Loop Files, folderPath "\*." ext, "FR" {
-                if IsExcluded(A_LoopFileName, A_LoopFileDir) {
-                    FILT.Excluded++
-                    continue
-                }
-                rel   := SubStr(A_LoopFilePath, StrLen(folderPath) + 2)
-                parts := StrSplit(rel, "\")
-                subdir := parts.Length > 1 ? folderName "\" parts[1] : folderName
-                items.Push({
-                    path:   A_LoopFilePath,
-                    subdir: subdir,
-                    name:   A_LoopFileName
-                })
-            }
-        }
+        ; 하위 폴더 정렬 후 재귀 수집
+        _GatherFrameRecurse(items, folderPath, folderName)
     }
     return items
+}
+
+; 액자 폴더 내 파일 수집 (하위 폴더 정렬 후 처리)
+_GatherFrameRecurse(items, folderPath, baseSubdir) {
+    ; 1) 현재 폴더의 이미지 직접 수집
+    for ext in CFG.Ext
+        Loop Files, folderPath "\*." ext, "F" {
+            if IsExcluded(A_LoopFileName, A_LoopFileDir) {
+                FILT.Excluded++
+                continue
+            }
+            items.Push({path: A_LoopFilePath, subdir: baseSubdir, name: A_LoopFileName})
+        }
+    ; 2) 하위 폴더 수집 후 정렬
+    subdirs := []
+    Loop Files, folderPath "\*", "D" {
+        subdirs.Push({path: A_LoopFilePath, name: A_LoopFileName})
+    }
+    _SortDirs(subdirs)
+    ; 3) 정렬된 하위 폴더 순으로 재귀
+    for sd in subdirs {
+        subSubdir := baseSubdir = "" ? sd.name : baseSubdir "\" sd.name
+        _GatherFrameRecurse(items, sd.path, subSubdir)
+    }
 }
 
 ScanRootStructure(root) {
@@ -170,6 +180,33 @@ CountImagesFlat(dir) {
     return 0
 }
 
+; 폴더명 비교: 숫자(01~99) → 숫자 크기순, 문자 → 숫자 뒤 가나다순
+_CompareDirName(a, b) {
+    aIsNum := RegExMatch(a, "^\d{1,2}$") && Integer(a) >= 1 && Integer(a) <= CFG.AlbumMax
+    bIsNum := RegExMatch(b, "^\d{1,2}$") && Integer(b) >= 1 && Integer(b) <= CFG.AlbumMax
+    if aIsNum && bIsNum
+        return Integer(a) - Integer(b)
+    if aIsNum
+        return -1
+    if bIsNum
+        return 1
+    return StrCompare(StrLower(a), StrLower(b))
+}
+
+; 폴더 배열 삽입 정렬 (폴더명 기준)
+_SortDirs(arr) {
+    Loop arr.Length - 1 {
+        i := A_Index + 1
+        temp := arr[i]
+        j := i - 1
+        while j >= 1 && _CompareDirName(arr[j].name, temp.name) > 0 {
+            arr[j + 1] := arr[j]
+            j--
+        }
+        arr[j + 1] := temp
+    }
+}
+
 ; 폴더명 정렬 키: 숫자(01~99) → 숫자 크기순, 그 외 → 가나다순
 _FolderSortKey(name) {
     if RegExMatch(name, "^\d{1,2}$") {
@@ -182,17 +219,7 @@ _FolderSortKey(name) {
 
 ; 앨범 폴더 배열 정렬 (폴더명 기준)
 _SortAlbumFolders(folders) {
-    n := folders.Length
-    Loop n - 1 {
-        i := A_Index + 1
-        key := folders[i]
-        j := i - 1
-        while j >= 1 && StrCompare(_FolderSortKey(folders[j].name), _FolderSortKey(key.name)) > 0 {
-            folders[j + 1] := folders[j]
-            j--
-        }
-        folders[j + 1] := key
-    }
+    _SortDirs(folders)
     return folders
 }
 
@@ -203,17 +230,7 @@ _SortPathsByFolderName(paths) {
         SplitPath(p, &name)
         pairs.Push({path: p, name: name})
     }
-    n := pairs.Length
-    Loop n - 1 {
-        i := A_Index + 1
-        key := pairs[i]
-        j := i - 1
-        while j >= 1 && StrCompare(_FolderSortKey(pairs[j].name), _FolderSortKey(key.name)) > 0 {
-            pairs[j + 1] := pairs[j]
-            j--
-        }
-        pairs[j + 1] := key
-    }
+    _SortDirs(pairs)
     out := []
     for p in pairs
         out.Push(p.path)
