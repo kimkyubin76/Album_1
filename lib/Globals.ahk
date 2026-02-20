@@ -48,6 +48,10 @@ global RIGHT_ORIG_W := 0
 
 ; 스플리터 드래그 상태
 global DRAG := { Active:false, Target:"", StartX:0, StartSideW:0, StartOrigW:0, LastT:0, JustEnded:false }
+; 리사이즈 드래그 구간 (WM_ENTERSIZEMOVE~EXITSIZEMOVE) — 버튼 깨짐 방지용
+global _Resizing := false
+global _LastResizeW := 0
+global _LastResizeH := 0
 global _LV_Col0W := 76   ; CustomDraw용 column 0 폭 캐시
 ; 헤더 컬럼 드래그 리사이즈 상태
 global _LVHdrTop := 0
@@ -91,5 +95,7 @@ global FILT := {
     UseRegex:    false,
     Excluded:    0
 }
+
+global REN_CFG := Map()
 
 global SETTINGS_INI := A_ScriptDir "\settings.ini"

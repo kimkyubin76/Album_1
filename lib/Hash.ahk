@@ -22,14 +22,43 @@ SHA256(filePath) {
             f.Close()
             return ""
         }
-        buf := Buffer(CFG.HashChunk)
-        rem := f.Length
-        while rem > 0 {
-            n := f.RawRead(buf, rem > CFG.HashChunk ? CFG.HashChunk : rem)
-            if n <= 0
-                break
-            DllCall("bcrypt\BCryptHashData", "Ptr", hH, "Ptr", buf, "UInt", n, "UInt", 0, "UInt")
-            rem -= n
+        buf       := Buffer(CFG.HashChunk)
+        fLen      := f.Length
+        halfChunk := CFG.HashChunk // 2   ; 512KB
+
+        if fLen <= CFG.HashChunk {
+            ; ── 소형 파일 (≤1MB): 전체 해시 ───────────────────────────
+            rem := fLen
+            while rem > 0 {
+                n := f.RawRead(buf, rem)
+                if n <= 0
+                    break
+                DllCall("bcrypt\BCryptHashData", "Ptr", hH, "Ptr", buf, "UInt", n, "UInt", 0, "UInt")
+                rem -= n
+            }
+        } else {
+            ; ── 대형 파일 (>1MB): 앞 512KB + 뒤 512KB 해시 ──────────
+            ; 파일 앞부분만 해싱할 경우 앞부분이 동일한 파일이 오매칭될 수 있으므로
+            ; 파일 끝부분도 함께 해시에 포함하여 구분력을 높임.
+            ; 앞 512KB
+            rem := halfChunk
+            while rem > 0 {
+                n := f.RawRead(buf, rem)
+                if n <= 0
+                    break
+                DllCall("bcrypt\BCryptHashData", "Ptr", hH, "Ptr", buf, "UInt", n, "UInt", 0, "UInt")
+                rem -= n
+            }
+            ; 뒤 512KB (파일 끝에서 halfChunk 이전 지점으로 이동)
+            f.Pos := fLen - halfChunk
+            rem   := halfChunk
+            while rem > 0 {
+                n := f.RawRead(buf, rem)
+                if n <= 0
+                    break
+                DllCall("bcrypt\BCryptHashData", "Ptr", hH, "Ptr", buf, "UInt", n, "UInt", 0, "UInt")
+                rem -= n
+            }
         }
         f.Close()
         hb := Buffer(32, 0)

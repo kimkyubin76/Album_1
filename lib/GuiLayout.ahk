@@ -6,10 +6,26 @@
 OnResize(thisGui, minMax, w, h) {
     if minMax = -1
         return
+    ; 리사이즈 드래그 중 Move() 과다 억제 — 80ms 디바운스 (버튼 깨짐 방지)
+    try if _Resizing {
+        global _LastResizeW := w, _LastResizeH := h
+        SetTimer(_ResizeDebounced, -80)
+        return
+    }
     try UI.PicF.Value := ""
     try UI.PicA.Value := ""
     DoLayout(w, h)
     SetTimer(_RefreshPreviews, -120)
+}
+
+_ResizeDebounced() {
+    global _Resizing, _LastResizeW, _LastResizeH
+    try if _Resizing {
+        try UI.PicF.Value := ""
+        try UI.PicA.Value := ""
+        DoLayout(_LastResizeW, _LastResizeH)
+        SetTimer(_RefreshPreviews, -120)
+    }
 }
 
 _RefreshPreviews() {
@@ -214,9 +230,8 @@ DoLayout(w, h) {
 
     ; ── Redraw 재활성화 + 전체 재그리기 (IExplorerBrowser 하위창 포함) ───
     DllCall("SendMessage", "Ptr", hwnd, "UInt", 0x000B, "Ptr", 1, "Ptr", 0) ; WM_SETREDRAW true
-    ; RedrawWindow: RDW_INVALIDATE(0x01)|RDW_ALLCHILDREN(0x80)|RDW_UPDATENOW(0x100)
-    ; IExplorerBrowser 의 SysListView32 등 손자 창까지 강제 재그리기
-    DllCall("RedrawWindow", "Ptr", hwnd, "Ptr", 0, "Ptr", 0, "UInt", 0x181)
+    ; RDW_ERASE(0x04)|INVALIDATE(0x01)|ALLCHILDREN(0x80)|UPDATENOW(0x100) — 잔상 제거
+    DllCall("RedrawWindow", "Ptr", hwnd, "Ptr", 0, "Ptr", 0, "UInt", 0x0185)
     EnsureCustomDrawBound()
 }
 
@@ -269,6 +284,7 @@ _LayoutActionBar(detX, detW, startY, M) {
     _PlaceOrHide(UI.BtnOpenF,    bY, 72, bH, &avail, &cx, OFF, LGAP)
     _PlaceOrHide(UI.BtnAlbumDir, bY, 98, bH, &avail, &cx, OFF, LGAP)
     _PlaceOrHide(UI.BtnFrameDir, bY, 98, bH, &avail, &cx, OFF, LGAP)
+    _PlaceOrHide(UI.BtnRename,   bY, 110, bH, &avail, &cx, OFF, LGAP)
 }
 
 ; 버튼 1개를 배치하거나 화면 밖으로 이동 (ByRef avail, cx 갱신)

@@ -33,7 +33,7 @@ GatherAlbum(root) {
                     FILT.Excluded++
                     continue
                 }
-                f.Push(A_LoopFilePath)
+                f.Push({path: A_LoopFilePath, size: A_LoopFileSize})
             }
     }
     ; 2) 루트 직접 이미지
@@ -43,7 +43,7 @@ GatherAlbum(root) {
                 FILT.Excluded++
                 continue
             }
-            f.Push(A_LoopFilePath)
+            f.Push({path: A_LoopFilePath, size: A_LoopFileSize})
         }
     return f
 }
@@ -72,7 +72,7 @@ _GatherFrameRecurse(items, folderPath, baseSubdir) {
                 FILT.Excluded++
                 continue
             }
-            items.Push({path: A_LoopFilePath, subdir: baseSubdir, name: A_LoopFileName})
+            items.Push({path: A_LoopFilePath, subdir: baseSubdir, name: A_LoopFileName, size: A_LoopFileSize})
         }
     ; 2) 하위 폴더 수집 후 정렬
     subdirs := []

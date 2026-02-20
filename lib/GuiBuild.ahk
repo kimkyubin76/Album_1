@@ -108,9 +108,10 @@ BuildGui() {
         OutputDebug("[BuildGui] OnMessage(0x004E) 등록 (LV 생성 직후)`n")
     }
 
-    ; ★ 리사이즈 완료 후 pill 강제 리페인트
+    ; ★ 리사이즈 드래그 구간 최적화 — 버튼 깨짐/잔상 방지
     static _sizeBound := false
     if !_sizeBound {
+        OnMessage(0x0231, OnWM_ENTERSIZEMOVE)  ; WM_ENTERSIZEMOVE
         OnMessage(0x0232, OnWM_EXITSIZEMOVE)  ; WM_EXITSIZEMOVE
         _sizeBound := true
     }
@@ -184,7 +185,8 @@ BuildGui() {
     g.SetFont("s8 norm", "맑은 고딕")
     UI.TxtRel := g.Add("Text", "x0 y0 w10 h22 +0x200 c57534E", "—")
     g.SetFont("s9 norm", "맑은 고딕")
-    UI.CmbMatch := g.Add("DropDownList", "x0 y0 w10", ["(없음)"])
+    ; -Border: [파일 열기] 버튼 우측에 CmbMatch 테두리가 겹쳐 보이는 현상 방지
+    UI.CmbMatch := g.Add("DropDownList", "x0 y0 w10 -Border", ["(없음)"])
     UI.CmbMatch.OnEvent("Change", OnMatchCombo)
     UI.TxtMCnt := g.Add("Text", "x0 y0 w44 h22 +0x200 c0284C7", "")
 
@@ -193,12 +195,14 @@ BuildGui() {
     UI.BtnOpenF    := g.Add("Button", "x0 y0 w72 h28", "파일 열기")
     UI.BtnAlbumDir := g.Add("Button", "x0 y0 w98 h28", "앨범 폴더 열기")
     UI.BtnFrameDir := g.Add("Button", "x0 y0 w98 h28", "액자 폴더 열기")
+    UI.BtnRename   := g.Add("Button", "x0 y0 w110 h28", "✏️ 선택 리네임")
 
     UI.BtnCopy.OnEvent("Click",     OnCopyPath)
     UI.BtnLocate.OnEvent("Click",   OnLocateAlbumFile)
     UI.BtnOpenF.OnEvent("Click",    OnOpenFile)
     UI.BtnAlbumDir.OnEvent("Click", OnOpenAlbumDir)
     UI.BtnFrameDir.OnEvent("Click", OnOpenFrameDir)
+    UI.BtnRename.OnEvent("Click",   OnManualRename)
     UI.BtnCopy.Enabled   := false
     UI.BtnLocate.Enabled := false
 
@@ -271,7 +275,9 @@ BuildGui() {
     UI._PicFPath := ""
     UI._PicAPath := ""
 
+    ; 폴더 패널(액자/앨범 리스트)에 포커스일 때는 F1~F4/방향키 무시 → 토글 단축키 차단
     HotIfWinActive("ahk_id " g.Hwnd)
+    HotIf(_EP_AllowMainHotkeys)
     Hotkey("Right",  (*) => NavNext())
     Hotkey("Left",   (*) => NavPrev())
     Hotkey("Enter",  (*) => NavNext())
@@ -279,9 +285,11 @@ BuildGui() {
     Hotkey("F2",     (*) => ApplyFilter("MATCH"))
     Hotkey("F3",     (*) => ApplyFilter("NOT"))
     Hotkey("F4",     (*) => NavNextNF())
+    HotIf()
 
     g.Show("w1100 h720")
     ExpPaneInit()   ; TreeView + ListView 컨트롤 생성 (Show 이후)
+    OnMessage(0x0100, _EP_OnKeyDown)   ; WM_KEYDOWN — 폴더 패널 F2 Rename 처리
     DllCall("Shell32\DragAcceptFiles", "Ptr", g.Hwnd, "Int", true)
     OnMessage(0x0233, OnWM_DROPFILES)
     DoLayout(1100, 720)

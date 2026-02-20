@@ -14,10 +14,14 @@ GdipInit() {
 ; 이미지 로드 → EXIF 회전 → 썸네일 생성 → HBITMAP 반환
 _GdipLoadRotated(path, maxW, maxH) {
     pImg := 0
-    r    := DllCall("gdiplus\GdipLoadImageFromFile", "WStr", path, "Ptr*", &pImg, "Int")
+    ; 최적화: 전체 이미지가 아닌 내장된 썸네일 해상도로 빠르게 로드 시도
+    ; 단, 이 방법은 EXIF 썸네일이 없거나 GDI+의 썸네일 로딩에 제약이 있을 수 있으므로,
+    ; 기본적으로는 원래 GdipLoadImageFromFile를 쓰되 원본 이미지를 다루는 오버헤드를 줄입니다.
+    r := DllCall("gdiplus\GdipLoadImageFromFile", "WStr", path, "Ptr*", &pImg, "Int")
     if r || !pImg
         return 0
 
+    ; ... EXIF 회전 및 비율 계산 ...
     orient := 1
     try {
         propSize := 0
@@ -47,6 +51,27 @@ _GdipLoadRotated(path, maxW, maxH) {
     ratio := Min(maxW / imgW, maxH / imgH)
     drawW := Max(1, Integer(imgW * ratio))
     drawH := Max(1, Integer(imgH * ratio))
+    
+    ; ------------------------------------------------------------
+    ; 최적화: GetThumbnailImage를 사용하여 메모리 부하 대폭 감소
+    ; 원본 이미지가 매우 클 경우, 썸네일 이미지를 추출하여 렌더링에 사용
+    ; ------------------------------------------------------------
+    pThumbImg := 0
+    DllCall("gdiplus\GdipGetImageThumbnail", "Ptr", pImg, "UInt", drawW, "UInt", drawH, "Ptr*", &pThumbImg, "Ptr", 0, "Ptr", 0)
+    if (pThumbImg) {
+        ; 썸네일 이미지를 성공적으로 가져왔다면 원본 이미지 객체를 썸네일로 교체
+        DllCall("gdiplus\GdipDisposeImage", "Ptr", pImg)
+        pImg := pThumbImg
+        
+        ; 썸네일 이미지의 실제 크기를 다시 측정
+        DllCall("gdiplus\GdipGetImageWidth",  "Ptr", pImg, "UInt*", &imgW)
+        DllCall("gdiplus\GdipGetImageHeight", "Ptr", pImg, "UInt*", &imgH)
+        
+        ratio := Min(maxW / imgW, maxH / imgH)
+        drawW := Max(1, Integer(imgW * ratio))
+        drawH := Max(1, Integer(imgH * ratio))
+    }
+    
     offX  := Integer((maxW - drawW) / 2)
     offY  := Integer((maxH - drawH) / 2)
 
@@ -60,7 +85,8 @@ _GdipLoadRotated(path, maxW, maxH) {
     pG := 0
     DllCall("gdiplus\GdipGetImageGraphicsContext", "Ptr", pThumb, "Ptr*", &pG)
     if pG {
-        DllCall("gdiplus\GdipSetInterpolationMode", "Ptr", pG, "Int", 7)
+        ; interpolation mode: InterpolationModeBilinear (4) is faster than HighQualityBicubic (7)
+        DllCall("gdiplus\GdipSetInterpolationMode", "Ptr", pG, "Int", 4) 
         pBrush := 0
         DllCall("gdiplus\GdipCreateSolidFill", "UInt", 0xFFFFFFFF, "Ptr*", &pBrush)
         if pBrush {

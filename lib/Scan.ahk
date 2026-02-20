@@ -43,20 +43,20 @@ OnScan(*) {
         return MsgBox("앨범(01~99) 폴더에 이미지 파일이 없습니다.`n" ST.AlbumPath, "알림", "Icon!")
     }
 
+    ; 크기별로 앨범 파일을 그룹화 (해시는 나중에 지연 계산)
+    AlbumBySize := Map()
     Loop totA {
         if ST.Cancel {
-            ScanDone("취소됨 (앨범 해시 " A_Index "/" totA ")")
+            ScanDone("취소됨 (앨범 크기 수집 " A_Index "/" totA ")")
             return
         }
-        i := A_Index
-        h := SHA256(aFiles[i])
-        if h {
-            if !ST.AlbumHash.Has(h)
-                ST.AlbumHash[h] := []
-            ST.AlbumHash[h].Push(aFiles[i])
-        }
-        if Mod(i, 40) = 0 || i = totA
-            Prog("앨범 해시 " i "/" totA " | " Elapsed(), Integer(i / totA * 500))
+        sz := aFiles[A_Index].size
+        if !AlbumBySize.Has(sz)
+            AlbumBySize[sz] := []
+        AlbumBySize[sz].Push(aFiles[A_Index])
+        
+        if Mod(A_Index, 200) = 0 || A_Index = totA
+            Prog("앨범 크기 수집 " A_Index "/" totA " | " Elapsed(), Integer(A_Index / totA * 500))
     }
 
     if ST.Cancel {
@@ -83,14 +83,45 @@ OnScan(*) {
         }
         i  := A_Index
         it := fFiles[i]
-        h  := SHA256(it.path)
+        sz := it.size
         s  := "NOT FOUND"
         mp := []
-        if h && ST.AlbumHash.Has(h) {
-            s  := "MATCH"
-            mp := ST.AlbumHash[h]
-            mc++
+        
+        ; 1차: 파일 크기 비교
+        if AlbumBySize.Has(sz) {
+            ; 크기가 동일한 앨범 파일이 존재할 때만 해시 비교 수행 (Lazy Hash)
+            itHash := ""
+            for aFileObj in AlbumBySize[sz] {
+                ; 앨범 파일도 해시가 없으면 구함
+                if !aFileObj.HasOwnProp("hash") {
+                    aFileObj.hash := SHA256(aFileObj.path)
+                    if (aFileObj.hash) {
+                        if !ST.AlbumHash.Has(aFileObj.hash)
+                            ST.AlbumHash[aFileObj.hash] := []
+                        ST.AlbumHash[aFileObj.hash].Push(aFileObj.path)
+                    }
+                }
+                
+                if (aFileObj.hash) {
+                    if (itHash = "")
+                        itHash := SHA256(it.path)
+                    
+                    if (itHash != "" && itHash = aFileObj.hash) {
+                        s := "MATCH"
+                        h := itHash ; hash 속성 대입용으로 h 설정
+                    }
+                }
+            }
+            if (s = "MATCH" && itHash != "") {
+                mp := ST.AlbumHash[itHash]
+                mc++
+            } else {
+                nc++
+                h := itHash ; NOT FOUND여도 계산된 해시가 있다면 저장
+            }
         } else {
+            ; 크기가 일치하는 파일조차 없으므로 해시 계산 없이 NOT FOUND
+            h := ""
             nc++
         }
         aNum := ""
@@ -101,6 +132,23 @@ OnScan(*) {
             matchedAlbumPath := mp[1]
             aRel := RelPath(matchedAlbumPath, ST.AlbumPath)
             aNum := AlbumNum(aRel)
+
+            if REN_CFG["AutoRenameOnMatch"] {
+                for idx, albumFile in mp {
+                    aRelLoop := RelPath(albumFile, ST.AlbumPath)
+                    aNumLoop := AlbumNum(aRelLoop)
+                    
+                    res := ExecuteRename(REN_CFG, albumFile, aNumLoop, it.subdir, it.path)
+                    
+                    if (res != "err: file not found" && !InStr(res, "skip:") && !InStr(res, "cancel:") && !InStr(res, "err:")) {
+                        mp[idx] := res
+                        if (idx = 1) {
+                            matchedAlbumPath := res
+                        }
+                    }
+                }
+            }
+
             SplitPath(matchedAlbumPath, &albumMatchFile)
             albumMatchPath := matchedAlbumPath
         }
@@ -352,8 +400,10 @@ ScanUI(on) {
     try UI.G["BtnAlbum"].Enabled := !on
     try UI.EdtFrame.Enabled      := !on
     try UI.EdtAlbum.Enabled      := !on
-    UI.BtnModeA.Enabled := !on
-    UI.BtnModeB.Enabled := !on
+    UI.BtnModeA.Enabled    := !on
+    UI.BtnModeB.Enabled    := !on
+    ; [Fix] 스캔 중 설정 다이얼로그 열기로 인한 재진입 방지
+    UI.BtnSettings.Enabled := !on
 }
 
 ScanDone(msg) {

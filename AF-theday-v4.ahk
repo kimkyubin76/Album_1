@@ -24,9 +24,11 @@
 #Include lib/GuiEvents.ahk
 #Include lib/GuiSettings.ahk
 #Include lib/GuiBuild.ahk
+#Include lib/RenameEngine.ahk
 
 GdipInit()
 LoadFilterSettings()
+global REN_CFG := LoadRenameSettings(SETTINGS_INI)
 LoadUiSettings()
 LoadLvColWidths()
 BuildGui()

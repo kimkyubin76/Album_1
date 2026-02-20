@@ -46,6 +46,57 @@ OnCustomerMemo(*) {
     SetTimer(() => ToolTip(), -2500)
 }
 
+OnManualRename(*) {
+    if ST.SelRow < 1 || ST.SelRow > ST.Filtered.Length
+        return
+    e := ST.Frames[ST.Filtered[ST.SelRow]]
+    if e.status != "MATCH" {
+        MsgBox("MATCH 상태인 항목만 리네임할 수 있습니다.", "안내", "Iconi")
+        return
+    }
+    
+    res := ExecuteRename(REN_CFG, e.albumMatchPath, e.albumNum, e.subdir, e.path)
+    if InStr(res, "err:") {
+        MsgBox("리네임 실패: " res, "오류", "IconX")
+    } else if InStr(res, "cancel:") {
+        ; Canceled by user
+    } else if InStr(res, "skip:") {
+        MsgBox("건너뜀: " res, "안내", "Iconi")
+    } else {
+        MsgBox("리네임 성공:`n" res, "성공", "Iconi")
+        ; 업데이트된 경로 반영
+        e.albumMatchFile := ""
+        SplitPath(res, &newFile)
+        e.albumMatchFile := newFile
+        e.albumMatchPath := res
+        
+        ; ListView 갱신 (Col2) - Requires AlbumDisplay logic, simpler to just modify row manually
+        if (e.albumNum != "")
+            newVal := e.albumNum " | " e.albumMatchFile
+        else
+            newVal := e.albumMatchFile
+            
+        UI.LV.Modify(ST.SelRow, "Col1", newVal)
+        SetPic(UI.PicA, res)
+        UI.PicFootA.Text := "  " _ShortPath(res)
+        UI.FullPath := res
+        UI.TxtRel.ToolTip := res
+        
+        ; MATCH 경로 목록 갱신
+        curSel := UI.CmbMatch.Value
+        e.matchPaths[curSel] := res
+        
+        items := []
+        for mp in e.matchPaths
+            items.Push(mp)
+        UI.CmbMatch.Delete()
+        UI.CmbMatch.Add(items)
+        UI.CmbMatch.Choose(curSel)
+        
+        EnsureCustomDrawBound()
+    }
+}
+
 ; ── 탐색기에서 파일 위치 열기 (/select) ────────────────────────────────────
 ;  성공 시 true, 실패(경로 없음 등) 시 false 반환
 OpenExplorerSelect(fullPath) {
