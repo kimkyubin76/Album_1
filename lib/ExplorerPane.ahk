@@ -13,7 +13,30 @@
 ;    ExpPaneClear(side)            — 트리/리스트 비우기
 ;    ExpPaneGetPath(side)          — 현재 리스트에 표시 중인 폴더 경로
 ;    ExpPaneDestroyAll()           — 정리
+;    IsFolderPanelFocused()        — 폴더 패널(액자/앨범 LV/TV)에 포커스 여부
 ; ============================================================
+
+; 폴더 패널(액자/앨범 리스트·트리)에 포커스가 있는지 판별 — HotIf/OnMessage에서 사용
+IsFolderPanelFocused() {
+    try {
+        h := DllCall("GetFocus", "Ptr")
+        if !h
+            return false
+        loop {
+            if h = UI.ExpLvF.Hwnd || h = UI.ExpLvA.Hwnd || h = UI.ExpTvF.Hwnd || h = UI.ExpTvA.Hwnd
+                return true
+            h := DllCall("GetParent", "Ptr", h, "Ptr")
+            if !h || h = UI.G.Hwnd
+                break
+        }
+    }
+    return false
+}
+
+; HotIf 콜백 — 폴더 패널에 포커스가 없을 때만 true 반환 (Hotkey가 발동되도록)
+_EP_AllowMainHotkeys(*) {
+    return !IsFolderPanelFocused()
+}
 
 global _EP := {
     F: { path: "", treeW: 180, bounds: {x:0,y:0,w:400,h:200} },
@@ -23,6 +46,8 @@ global _EP := {
 }
 
 global _EPDrag := { Active: false, Side: "", StartX: 0, StartTreeW: 0, LastT: 0 }
+global _EP_RenamePending := ""
+global _EP_RenameUndo    := ""   ; Ctrl+Z 1단계 undo 저장
 
 ; ── Shell 아이콘 시스템 ─────────────────────────────────────────
 global _EP_IL_LV := 0          ; ListView용 ImageList
@@ -44,7 +69,7 @@ ExpPaneInit() {
     ; ── 액자 패널 (F) ──────────────────────────────────────────────
     UI.ExpTvF := g.Add("TreeView", "x0 y0 w10 h10 +HScroll BackgroundWhite vExpTvF")
     UI.ExpLvF := g.Add("ListView"
-        , "x0 y0 w10 h10 +LV0x20 NoSortHdr BackgroundWhite vExpLvF"
+        , "x0 y0 w10 h10 +LV0x220 NoSortHdr BackgroundWhite vExpLvF"
         , ["이름", "크기", "수정일"])
     UI.ExpSplitF := g.Add("Text", "x0 y0 w4 h10 BackgroundE0E0E0 vExpSplitF", "")
 
@@ -62,7 +87,7 @@ ExpPaneInit() {
     ; ── 앨범 패널 (A) ──────────────────────────────────────────────
     UI.ExpTvA := g.Add("TreeView", "x0 y0 w10 h10 +HScroll BackgroundWhite vExpTvA")
     UI.ExpLvA := g.Add("ListView"
-        , "x0 y0 w10 h10 +LV0x20 BackgroundWhite vExpLvA"
+        , "x0 y0 w10 h10 +LV0x220 BackgroundWhite vExpLvA"
         , ["이름", "크기", "수정일"])
     UI.ExpSplitA := g.Add("Text", "x0 y0 w4 h10 BackgroundE0E0E0 vExpSplitA", "")
 
@@ -77,6 +102,11 @@ ExpPaneInit() {
     UI.ExpLvA.OnEvent("ContextMenu", (ctrl, item, isRight, x, y) => _EP_OnLvCtxMenu("A", ctrl, item, isRight, x, y))
 
     _EP_SetTransparent(UI.ExpSplitA)
+
+    ; LVS_EDITLABELS(0x0200) 기본 창 스타일 적용 — F2/LVM_EDITLABEL 인라인 편집 활성화
+    ; (AHK +LV0x220 은 확장 스타일이므로 기본 스타일에 별도 OR 필요)
+    _EP_SetEditLabelsStyle(UI.ExpLvF)
+    _EP_SetEditLabelsStyle(UI.ExpLvA)
 
     _EP_LoadSettings()
     OutputDebug("[ExpPane] Init OK (TV+LV + Shell icons)`n")
@@ -498,6 +528,343 @@ _EP_OnListDbl(side, ctrl, row) {
         try Run('"' fullPath '"')
 }
 
+; ── 폴더 패널 키보드 처리 (F2 / Enter / Delete / Ctrl+A / Ctrl+Z) ──────
+_EP_OnKeyDown(wParam, lParam, msg, hwnd) {
+    side := _EP_GetSideFromHwnd(hwnd)
+    if side = "" {
+        if wParam = 0x71
+            OutputDebug("[RENAME] F2 key hwnd=" hwnd " → side=empty (not folder panel), skip`n")
+        return   ; 폴더 패널 아님 → 기본 처리 유지
+    }
+
+    ctrlDown := DllCall("GetKeyState", "UInt", 0x11, "UInt") & 0x8000   ; VK_CONTROL
+
+    if wParam = 0x71 {                    ; VK_F2 → 인라인 Rename
+        OutputDebug("[RENAME] F2 key hwnd=" hwnd " side=" side " (ExpLvF=" UI.ExpLvF.Hwnd " ExpLvA=" UI.ExpLvA.Hwnd " LV=" UI.LV.Hwnd ")`n")
+        _EP_DoRename(side)
+        return 0
+    }
+    if wParam = 0x0D {                    ; VK_RETURN → 폴더 진입 / 파일 열기
+        _EP_DoEnter(side)
+        return 0
+    }
+    if wParam = 0x2E {                    ; VK_DELETE → 선택 항목 삭제
+        _EP_DoDelete(side)
+        return 0
+    }
+    if ctrlDown && wParam = 0x41 {        ; Ctrl+A → 전체 선택
+        _EP_DoSelectAll(side)
+        return 0
+    }
+    if ctrlDown && wParam = 0x5A {        ; Ctrl+Z → 리네임 되돌리기
+        _EP_DoUndoRename()
+        return 0
+    }
+}
+
+_EP_GetSideFromHwnd(hwnd) {
+    try {
+        h := hwnd
+        loop {
+            if h = UI.ExpLvF.Hwnd || h = UI.ExpTvF.Hwnd
+                return "F"
+            if h = UI.ExpLvA.Hwnd || h = UI.ExpTvA.Hwnd
+                return "A"
+            h := DllCall("GetParent", "Ptr", h, "Ptr")
+            if !h || h = UI.G.Hwnd
+                break
+        }
+    }
+    return ""
+}
+
+_EP_DoRename(side) {
+    global _EP, _EP_RenamePending
+    ep := (side = "F") ? _EP.F : _EP.A
+    lv := (side = "F") ? UI.ExpLvF : UI.ExpLvA
+    row := lv.GetNext(0)
+    if row < 1 {
+        OutputDebug("[RENAME] _EP_DoRename side=" side " → no selection, skip`n")
+        return
+    }
+    name := lv.GetText(row, 1)
+    fullPath := ep.path "\" name
+    OutputDebug("[RENAME] _EP_DoRename lvHwnd=" lv.Hwnd " side=" side " row=" row " oldPath=" fullPath "`n")
+    if !FileExist(fullPath) && !DirExist(fullPath) {
+        OutputDebug("[RENAME] _EP_DoRename → path not exist, skip`n")
+        return
+    }
+    _EP_RenamePending := {side: side, oldPath: fullPath}
+    ; LVM_EDITLABEL(0x1017): 항목 위에서 바로 인라인 편집 시작 (윈도우 탐색기처럼)
+    ; SendMessage 반환값 = 인라인 에디트 컨트롤 HWND
+    hEdit := SendMessage(0x1017, row - 1, 0, lv)
+    ; 확장자 제외하고 파일명 부분만 선택 (윈도우 탐색기 동작: "aaa.jpg" → "aaa" 만 선택)
+    if hEdit {
+        SplitPath(name, , , &_ext, &_nameNoExt)
+        ; ext 있고 nameNoExt 있는 경우만 확장자 제외, 그 외(폴더·숨김파일 등)는 전체 선택
+        selEnd := (_ext != "" && _nameNoExt != "") ? StrLen(_nameNoExt) : StrLen(name)
+        ; EM_SETSEL(0x00B1): wParam=선택 시작(0), lParam=선택 끝(selEnd)
+        DllCall("SendMessageW", "Ptr", hEdit, "UInt", 0x00B1, "Ptr", 0, "Ptr", selEnd)
+    }
+}
+
+; ── ① Ctrl+A — 현재 ListView 전체 선택 ──────────────────────────────
+_EP_DoSelectAll(side) {
+    lv := (side = "F") ? UI.ExpLvF : UI.ExpLvA
+    if lv.GetCount() = 0
+        return
+    ; LVM_SETITEMSTATE(0x102B), iItem=-1 → 모든 항목에 일괄 적용
+    ; LVITEM: mask(0) state(12) stateMask(16) — LVIS_SELECTED = 0x0002
+    lvItem := Buffer(20, 0)
+    NumPut("UInt", 0x0002, lvItem, 12)   ; state     = LVIS_SELECTED
+    NumPut("UInt", 0x0002, lvItem, 16)   ; stateMask = LVIS_SELECTED
+    SendMessage(0x102B, -1, lvItem.Ptr, lv)
+    OutputDebug("[EP] Ctrl+A 전체 선택 side=" side " count=" lv.GetCount() "`n")
+}
+
+; ── ② VK_DELETE — 선택 항목 삭제 (확인 대화상자 포함) ─────────────────
+_EP_DoDelete(side) {
+    global _EP
+    ep := (side = "F") ? _EP.F : _EP.A
+    lv := (side = "F") ? UI.ExpLvF : UI.ExpLvA
+    paths := []
+    row := 0
+    Loop {
+        row := lv.GetNext(row)
+        if row = 0
+            break
+        name := lv.GetText(row, 1)
+        if name != ""
+            paths.Push(ep.path "\" name)
+    }
+    if paths.Length = 0
+        return
+    confirmMsg := paths.Length = 1
+        ? '"' paths[1] '"' "`n`n삭제하시겠습니까?"
+        : paths.Length "개 항목을 삭제하시겠습니까?"
+    if MsgBox(confirmMsg, "삭제 확인", "YesNo Icon! Default2") != "Yes"
+        return
+    errList := []
+    for p in paths {
+        try {
+            if DirExist(p)
+                DirDelete(p, true)
+            else
+                FileDelete(p)
+        } catch as e {
+            errList.Push(p "`n  → " e.Message)
+        }
+    }
+    if errList.Length > 0
+        MsgBox("삭제 실패 항목:`n" _EP_JoinArr(errList), "오류", "IconX")
+    _EP_PopulateList(side, ep.path)
+    OutputDebug("[EP] Delete " paths.Length "개 side=" side "`n")
+}
+
+; ── ③ Ctrl+Z — 마지막 리네임 1단계 되돌리기 ──────────────────────────
+_EP_DoUndoRename() {
+    global _EP, _EP_RenameUndo
+    if !IsObject(_EP_RenameUndo) || !_EP_RenameUndo.HasProp("newPath") {
+        OutputDebug("[EP] Ctrl+Z: 되돌릴 리네임 없음`n")
+        return
+    }
+    old  := _EP_RenameUndo.oldPath
+    new  := _EP_RenameUndo.newPath
+    side := _EP_RenameUndo.side
+    if !FileExist(new) && !DirExist(new) {
+        MsgBox("되돌릴 파일이 이미 없습니다.`n" new, "되돌리기 실패", "Icon!")
+        _EP_RenameUndo := ""
+        return
+    }
+    if FileExist(old) || DirExist(old) {
+        MsgBox('"' old '"' " 경로가 이미 존재합니다. 덮어쓸 수 없어 되돌리지 못했습니다.", "되돌리기 실패", "Icon!")
+        return
+    }
+    try {
+        if DirExist(new)
+            DirMove(new, old, "R")
+        else
+            FileMove(new, old, 0)
+        ep := (side = "F") ? _EP.F : _EP.A
+        _EP_PopulateList(side, ep.path)
+        ExpPaneSelect(side, old)
+        _EP_RenameUndo := ""
+        OutputDebug("[EP] Ctrl+Z 되돌림: " new " → " old "`n")
+    } catch as e {
+        MsgBox("되돌리기 실패: " e.Message, "오류", "IconX")
+    }
+}
+
+; ── ④ VK_RETURN — 선택 항목 폴더 진입 또는 파일 열기 ─────────────────
+_EP_DoEnter(side) {
+    global _EP
+    ep := (side = "F") ? _EP.F : _EP.A
+    lv := (side = "F") ? UI.ExpLvF : UI.ExpLvA
+    row := lv.GetNext(0)
+    if row < 1
+        return
+    name := lv.GetText(row, 1)
+    fullPath := ep.path "\" name
+    if DirExist(fullPath) {
+        ExpPaneNav(side, fullPath)
+        lbl := (side = "F") ? UI.ExpPathF : UI.ExpPathA
+        lbl.Text := "  " _EP_ShortPath(fullPath)
+        return
+    }
+    if FileExist(fullPath)
+        try Run('"' fullPath '"')
+    OutputDebug("[EP] Enter → " fullPath "`n")
+}
+
+; ★ 리네임 성공 후 내부 데이터 구조 업데이트
+_EP_UpdateAfterRename(oldPath, newPath, side) {
+    global _EP, ST, UI
+    SplitPath(oldPath, &oldName)
+    SplitPath(newPath, &newName)
+    ; 1) 앨범 패널(A) listRows 갱신
+    if side = "A" {
+        ep := _EP.A
+        if ep.HasProp("listRows") && IsObject(ep.listRows) {
+            for r in ep.listRows {
+                if r.name = oldName {
+                    r.name := newName
+                    break
+                }
+            }
+        }
+    }
+    ; 2) ST.Frames — albumMatchPath/albumMatchFile 동기화 (상단 리스트·미리보기 반영)
+    if IsObject(ST.Frames) {
+        for e in ST.Frames {
+            if e.HasProp("albumMatchPath") && e.albumMatchPath = oldPath {
+                e.albumMatchPath := newPath
+                e.albumMatchFile := newName
+                ; matchPaths 배열도 갱신
+                if e.HasProp("matchPaths") && IsObject(e.matchPaths) {
+                    for i, mp in e.matchPaths {
+                        if mp = oldPath
+                            e.matchPaths[i] := newPath
+                    }
+                }
+            }
+        }
+        ; 선택 행이 해당 항목이면 UI 갱신
+        if ST.SelRow >= 1 && ST.SelRow <= ST.Filtered.Length {
+            e := ST.Frames[ST.Filtered[ST.SelRow]]
+            if e.HasProp("albumMatchPath") && e.albumMatchPath = newPath {
+                newVal := (e.albumNum != "" ? e.albumNum " | " : "") . newName
+                try UI.LV.Modify(ST.SelRow, "Col1", newVal)
+                try UI.PicFootA.Text := "  " _ShortPath(newPath)
+                try UI.FullPath := newPath
+                try UI.TxtRel.ToolTip := newPath
+                if e.HasProp("matchPaths") && e.matchPaths.Length > 0 {
+                    try SetPic(UI.PicA, newPath)
+                    try UI.CmbMatch.Delete()
+                    try {
+                        for mp in e.matchPaths
+                            UI.CmbMatch.Add(mp)
+                        UI.CmbMatch.Choose(1)
+                    }
+                }
+                EnsureCustomDrawBound()
+            }
+        }
+    }
+}
+
+; LVN_ENDLABELEDIT(-105) — 인라인 편집 완료 시 실제 파일/폴더 리네임
+;
+; ★ LVN_ENDLABELEDIT 반환값 규칙 (MSDN 기준)
+;   TRUE  (1, 非0) = 수락 — Windows가 ListView 항목 텍스트를 새 이름으로 즉시 갱신
+;   FALSE (0)      = 거부 — Windows가 기존 이름을 복원
+;
+; ★ 동기 lv.Delete() 금지
+;   LVN_ENDLABELEDIT 핸들러 내에서 lv.Delete()/lv.Add()를 동기로 호출하면
+;   Windows가 TRUE 반환 후 항목 텍스트를 갱신하려 할 때 항목이 이미 없어져
+;   화면에 이름이 바뀌지 않는 것처럼 보임.
+;   → SetTimer로 다음 메시지 루프에서 안전하게 목록 새로고침
+_EP_OnEndLabelEdit(lParam) {
+    global _EP, _EP_RenamePending, _EP_RenameUndo
+    OutputDebug("[RENAME] handler=_EP_OnEndLabelEdit ENTRY`n")
+    if !IsObject(_EP_RenamePending) || !_EP_RenamePending.HasProp("side") {
+        OutputDebug("[RENAME] handler=_EP_OnEndLabelEdit → reject: no _EP_RenamePending`n")
+        return 0   ; 알 수 없는 편집 → 거부
+    }
+    hwndFrom := NumGet(lParam, 0, "Ptr")
+    side := ""
+    if hwndFrom = UI.ExpLvF.Hwnd
+        side := "F"
+    else if hwndFrom = UI.ExpLvA.Hwnd
+        side := "A"
+    if side = "" || side != _EP_RenamePending.side {
+        OutputDebug("[RENAME] handler=_EP_OnEndLabelEdit → reject: side mismatch side=" side " pending=" _EP_RenamePending.side "`n")
+        return 0   ; 패널 불일치 → 거부
+    }
+    ; NMLVDISPINFO: NMHDR(Ptr+Ptr+Int=20B) + LVITEM.mask(4)+iItem(4)+iSubItem(4)+state(4)+stateMask(4)
+    O_PSZTEXT := A_PtrSize = 8 ? 40 : 32
+    pszText := NumGet(lParam, O_PSZTEXT, "Ptr")
+    if !pszText {
+        _EP_RenamePending := ""
+        OutputDebug("[RENAME] handler=_EP_OnEndLabelEdit → reject: Esc cancel (pszText=0)`n")
+        return 0   ; Esc 취소 → 거부(기존 이름 유지)
+    }
+    newName := Trim(StrGet(pszText, "UTF-16"), " `t")
+    if newName = "" {
+        _EP_RenamePending := ""
+        OutputDebug("[RENAME] handler=_EP_OnEndLabelEdit → reject: empty name`n")
+        return 0   ; 빈 이름 → 거부
+    }
+    oldPath := _EP_RenamePending.oldPath
+    SplitPath(oldPath, , &dir)
+    newPath := dir "\" newName
+    OutputDebug("[RENAME] handler=_EP_OnEndLabelEdit old=" oldPath " new=" newPath "`n")
+    if newPath = oldPath {
+        _EP_RenamePending := ""
+        OutputDebug("[RENAME] handler=_EP_OnEndLabelEdit → reject: no change`n")
+        return 0   ; 변경 없음 → 거부(기존 유지)
+    }
+    if FileExist(newPath) || DirExist(newPath) {
+        MsgBox("같은 이름의 파일/폴더가 이미 존재합니다.", "이름 충돌", "Icon!")
+        OutputDebug("[RENAME] handler=_EP_OnEndLabelEdit → reject: conflict`n")
+        return 0   ; 충돌 → 거부
+    }
+    try {
+        ; ★ 실제 디스크 파일/폴더명 변경 (필수)
+        if DirExist(oldPath) {
+            DirMove(oldPath, newPath, "R")
+            OutputDebug("[RENAME] handler=_EP_OnEndLabelEdit DirMove done`n")
+        } else {
+            if !FileMove(oldPath, newPath, 0)
+                throw OSError(A_LastError, "FileMove", oldPath " → " newPath)
+            OutputDebug("[RENAME] handler=_EP_OnEndLabelEdit FileMove done`n")
+        }
+        ; ★ 디스크 검증 (필수)
+        movedOk := FileExist(newPath) || DirExist(newPath)
+        oldStill := FileExist(oldPath) || DirExist(oldPath)
+        OutputDebug("[RENAME] handler=_EP_OnEndLabelEdit diskVerify movedOk=" (movedOk ? "1" : "0") " oldStill=" (oldStill ? "1" : "0") "`n")
+        if !movedOk || oldStill {
+            errMsg := "디스크 검증 실패: 새 경로 존재=" (movedOk ? "Y" : "N") " 구경로 잔존=" (oldStill ? "Y" : "N")
+            MsgBox(errMsg "`n`nold=" oldPath "`nnew=" newPath, "리네임 오류", "IconX")
+            _EP_RenamePending := ""
+            return 0
+        }
+        ; Ctrl+Z undo 기록 (1단계)
+        _EP_RenameUndo := {side: side, oldPath: oldPath, newPath: newPath}
+        ; ★ 내부 데이터 구조 업데이트 (앨범 패널 + ST.Frames)
+        _EP_UpdateAfterRename(oldPath, newPath, side)
+        ; ★ 목록 새로고침은 SetTimer로 비동기 처리
+        SetTimer(() => (_EP_CtxRefresh(side), ExpPaneSelect(side, newPath)), -50)
+        OutputDebug("[RENAME] handler=_EP_OnEndLabelEdit SUCCESS return 1`n")
+    } catch as e {
+        MsgBox("이름 변경 실패: " e.Message, "오류", "IconX")
+        OutputDebug("[RENAME] handler=_EP_OnEndLabelEdit CATCH " e.Message "`n")
+        _EP_RenamePending := ""
+        return 0   ; 실패 → 거부(기존 이름 유지)
+    }
+    _EP_RenamePending := ""
+    return 1   ; ★ 수락(TRUE) — Windows가 항목 텍스트를 새 이름으로 즉시 반영
+}
+
 ; ============================================================
 ;  스플리터 드래그
 ; ============================================================
@@ -599,6 +966,16 @@ _EP_SetTransparent(ctrl) {
     DllCall("SetWindowLongPtr", "Ptr", ctrl.Hwnd, "Int", -20, "Ptr", ex | 0x20)
 }
 
+; LVS_EDITLABELS (0x0200) — ListView 기본 창 스타일에 인라인 편집 플래그 추가
+; LVM_EDITLABEL(0x1017)이 동작하려면 기본 스타일(GWL_STYLE, -16)에
+; LVS_EDITLABELS 비트가 설정되어 있어야 함.
+; AHK의 +LV0x??? 옵션은 확장 스타일(LVM_SETEXTENDEDLISTVIEWSTYLE)이므로
+; 이 함수를 통해 별도로 기본 스타일에 OR 처리함.
+_EP_SetEditLabelsStyle(lv) {
+    style := DllCall("GetWindowLongPtr", "Ptr", lv.Hwnd, "Int", -16, "Ptr")
+    DllCall("SetWindowLongPtr", "Ptr", lv.Hwnd, "Int", -16, "Ptr", style | 0x0200)
+}
+
 _EP_SaveSettings() {
     global _EP, SETTINGS_INI
     try {
@@ -682,9 +1059,18 @@ _EP_OnLvCtxMenu(side, ctrl, item, isRight, x, y) {
 
     OutputDebug("[EP-LvCtx] side=" side " item=" item " names=" _EP_JoinArr(names) "`n")
 
-    ; 앨범 패널(A): 항상 보기 메뉴 포함한 커스텀 메뉴 표시
+    ; 앨범 패널(A): Windows Shell 기본 컨텍스트 메뉴만 표시 (커스텀 메뉴 제거)
     if side = "A" {
-        _EP_ShowAlbumLvMenu(curDir, names, sx, sy)
+        if names.Length > 0
+            _EP_ShowShellMenu(ctrl.Hwnd, side, curDir, names, sx, sy)
+        else {
+            ; 빈 공간 우클릭 → 폴더 배경 메뉴 (부모 기준 현재 폴더 1개로 Shell 메뉴)
+            SplitPath(curDir, &folderName, &parentDir)
+            if parentDir != "" && folderName != ""
+                _EP_ShowShellMenu(ctrl.Hwnd, side, parentDir, [folderName], sx, sy)
+            else
+                _EP_ShowFallbackMenu(side, curDir, sx, sy)
+        }
         return
     }
     if names.Length > 0 {
@@ -762,7 +1148,20 @@ _EP_ShowShellMenu(hwnd, side, dirPath, names, sx, sy) {
     if hr != 0 || pSF = 0
         return false
 
-    ; 2) 파일명 → child PIDL 배열 (IShellFolder::ParseDisplayName)
+    ; ── [Fix] vtable 인덱스 근거 (IShellFolder COM 표준 스펙 고정값) ──────────
+    ; IShellFolder (IID: 000214E6) 상속 구조:
+    ;   IUnknown  vtable[0]=QueryInterface, [1]=AddRef, [2]=Release
+    ;   IShellFolder vtable[3]=ParseDisplayName, [4]=EnumObjects,
+    ;               [5]=BindToObject, [6]=BindToStorage, [7]=CompareIDs,
+    ;               [8]=CreateViewObject, [9]=GetAttributesOf, [10]=GetUIObjectOf
+    ; IContextMenu (IID: 000214E4) 상속 구조:
+    ;   IUnknown  vtable[0]=QueryInterface, [1]=AddRef, [2]=Release
+    ;   IContextMenu vtable[3]=QueryContextMenu, [4]=InvokeCommand, [5]=GetCommandString
+    ; 위 인덱스는 Windows SDK 공식 COM 인터페이스 정의에 따른 고정값으로
+    ; Windows 버전에 무관하게 동일하게 유지됨 (COM binary stability 보장).
+    ; ─────────────────────────────────────────────────────────────────────────
+
+    ; 2) 파일명 → child PIDL 배열 (IShellFolder::ParseDisplayName — vtable[3])
     cidl := names.Length
     childPidls := []
     apidl := Buffer(cidl * A_PtrSize, 0)
@@ -775,7 +1174,7 @@ _EP_ShowShellMenu(hwnd, side, dirPath, names, sx, sy) {
             OutputDebug("[EP-Ctx] ParseDisplayName 실패: " name "`n")
             for p in childPidls
                 DllCall("ole32\CoTaskMemFree", "Ptr", p)
-            ComCall(2, pSF)
+            ComCall(2, pSF)   ; IUnknown::Release
             return false
         }
         childPidls.Push(cpidl)
@@ -790,14 +1189,16 @@ _EP_ShowShellMenu(hwnd, side, dirPath, names, sx, sy) {
 
     for p in childPidls
         DllCall("ole32\CoTaskMemFree", "Ptr", p)
-    ComCall(2, pSF)
+    ComCall(2, pSF)   ; IUnknown::Release
 
     if !pCM {
         OutputDebug("[EP-Ctx] GetUIObjectOf 실패`n")
         return false
     }
 
-    ; 4) IContextMenu2 / IContextMenu3 (owner-draw 서브메뉴 아이콘)
+    ; 4) IContextMenu2/3 QI — vtable[0] = IUnknown::QueryInterface
+    ;    IContextMenu3 (BCFCE0A0): HandleMenuMsg2(WM_MENUCHAR 처리)
+    ;    IContextMenu2 (000214F4): HandleMenuMsg(owner-draw 서브메뉴 렌더링)
     _EP_ICM2 := 0, _EP_ICM3 := 0
     p3 := 0
     try ComCall(0, pCM, "Ptr", _EP_GUID("{BCFCE0A0-EC17-11D0-8D10-00A0C90F2719}"), "Ptr*", &p3)
@@ -811,9 +1212,18 @@ _EP_ShowShellMenu(hwnd, side, dirPath, names, sx, sy) {
             _EP_ICM2 := p2
     }
 
-    ; 5) 팝업 메뉴 생성 + QueryContextMenu (vtable[3])
+    ; 5) 팝업 메뉴 생성 + "이름 바꾸기" 맨 위 삽입 + QueryContextMenu (vtable[3])
     hMenu := DllCall("CreatePopupMenu", "Ptr")
-    try ComCall(3, pCM, "Ptr", hMenu, "UInt", 0, "UInt", 1, "UInt", 0x7FFF, "UInt", 0x00000000)
+    if !hMenu {
+        OutputDebug("[EP-Ctx] CreatePopupMenu 실패`n")
+        ComCall(2, pCM)
+        return false
+    }
+    ; "이름 바꾸기"를 맨 위에 추가 (ID=1). Shell 메뉴는 idCmdFirst=2부터 시작
+    DllCall("InsertMenu", "Ptr", hMenu, "UInt", 0, "UInt", 0x400|0x0,   "Ptr", 1, "WStr", "이름 바꾸기")
+    DllCall("InsertMenu", "Ptr", hMenu, "UInt", 1, "UInt", 0x400|0x800, "Ptr", 0, "Ptr",  0)
+    ; IContextMenu::QueryContextMenu — vtable[3]
+    try ComCall(3, pCM, "Ptr", hMenu, "UInt", 2, "UInt", 2, "UInt", 0x7FFF, "UInt", 0x00000000)
 
     ; 6) OnMessage 훅 — owner-draw 서브메뉴(보내기, 연결 프로그램 등) 렌더링
     OnMessage(0x0117, _EP_HandleMenuMsg)    ; WM_INITMENUPOPUP
@@ -832,13 +1242,15 @@ _EP_ShowShellMenu(hwnd, side, dirPath, names, sx, sy) {
     OnMessage(0x002C, _EP_HandleMenuMsg, 0)
     OnMessage(0x0120, _EP_HandleMenuChar, 0)
 
-    ; 9) 명령 실행 (IContextMenu::InvokeCommand — vtable[4])
-    if cmd > 0 {
+    ; 9) 명령 실행 — cmd=1: "이름 바꾸기"(인라인 편집), cmd>=2: Shell InvokeCommand
+    if cmd = 1 {
+        _EP_DoRename(side)
+    } else if cmd > 1 {
         sz := A_PtrSize = 8 ? 56 : 36
         ici := Buffer(sz, 0)
         NumPut("UInt", sz, ici, 0)
         NumPut("Ptr", hwnd, ici, 8)
-        NumPut("Ptr", cmd - 1, ici, A_PtrSize = 8 ? 16 : 12)
+        NumPut("Ptr", cmd - 2, ici, A_PtrSize = 8 ? 16 : 12)
         NumPut("Int", 1, ici, A_PtrSize = 8 ? 40 : 24)
         try ComCall(4, pCM, "Ptr", ici)
         SetTimer(() => _EP_CtxRefresh(side), -500)

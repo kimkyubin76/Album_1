@@ -409,6 +409,31 @@ OnWM_NOTIFY(wParam, lParam, msg, hwnd) {
     code := NumGet(lParam, A_PtrSize * 2, "Int")
     hwndFrom := NumGet(lParam, 0, "Ptr")
 
+    ; LVN_ENDLABELEDIT = -105 — 폴더 패널 인라인 리네임 완료
+    if code = -105 {
+        ; ★ 리네임 엔트리포인트 로그: 어느 ListView가 이벤트를 받았는지
+        try {
+            lvName := ""
+            if hwndFrom = UI.ExpLvF.Hwnd
+                lvName := "ExpLvF(액자)"
+            else if hwndFrom = UI.ExpLvA.Hwnd
+                lvName := "ExpLvA(앨범)"
+            else if hwndFrom = UI.LV.Hwnd
+                lvName := "LV(상단매칭리스트)"
+            else
+                lvName := "OTHER(hwnd=" hwndFrom ")"
+            OutputDebug("[RENAME] OnNotify code=-105 hwndFrom=" hwndFrom " lv=" lvName " ExpLvF=" UI.ExpLvF.Hwnd " ExpLvA=" UI.ExpLvA.Hwnd " LV=" UI.LV.Hwnd "`n")
+        }
+        try {
+            if hwndFrom = UI.ExpLvF.Hwnd || hwndFrom = UI.ExpLvA.Hwnd {
+                ret := _EP_OnEndLabelEdit(lParam)
+                OutputDebug("[RENAME] OnNotify → _EP_OnEndLabelEdit returned " ret "`n")
+                return ret
+            }
+            OutputDebug("[RENAME] OnNotify → NOT routed (hwndFrom not ExpLvF/ExpLvA)`n")
+        }
+    }
+
     ; HDN_ENDTRACKW = -327, HDN_ENDTRACK(ANSI) = -307
     if code = -327 || code = -307 {
         try {
@@ -419,19 +444,39 @@ OnWM_NOTIFY(wParam, lParam, msg, hwnd) {
     }
 }
 
-; ── 리사이즈 완료 시 pill 강제 리페인트 ──
-OnWM_EXITSIZEMOVE(wParam, lParam, msg, hwnd) {
-    SetTimer(_ForceRepaintLV, -30)
+; ── 리사이즈 드래그 구간 최적화 (버튼 깨짐/잔상 방지) ──
+; 원인: WM_SIZE 연속 호출로 Move() 과다 + EXITSIZEMOVE 시 LV만 Redraw하여 버튼바 미갱신
+OnWM_ENTERSIZEMOVE(wParam, lParam, msg, hwnd) {
+    global _Resizing
+    _Resizing := true
 }
 
-_ForceRepaintLV() {
+OnWM_EXITSIZEMOVE(wParam, lParam, msg, hwnd) {
+    global _Resizing
+    _Resizing := false
+    SetTimer(_ForceRepaintAfterResize, -50)   ; 50ms: 창 안정화 후 재그리기
+}
+
+; 드래그 종료 시 전체 레이아웃 1회 재정렬 + 버튼바 포함 강제 리프레시
+_ForceRepaintAfterResize() {
     try {
-        h := UI.LV.Hwnd
+        hMain := UI.G.Hwnd
+        rc := Buffer(16, 0)
+        if !DllCall("GetClientRect", "Ptr", hMain, "Ptr", rc)
+            return
+        w := NumGet(rc, 8, "Int")
+        h := NumGet(rc, 12, "Int")
+        if w < 100 || h < 100
+            return
+        DoLayout(w, h)
+        ; RDW_ERASE(0x04)|INVALIDATE(0x01)|UPDATENOW(0x100)|ALLCHILDREN(0x80) — 잔상 제거 + 버튼바 재그리기
+        DllCall("RedrawWindow", "Ptr", hMain, "Ptr", 0, "Ptr", 0, "UInt", 0x0185)
+        ; LV pill 배지 보정
+        hLv := UI.LV.Hwnd
         cnt := ST.Filtered.Length
         if cnt > 0
-            DllCall("SendMessageW", "Ptr", h, "UInt", 0x1015, "Ptr", 0, "Ptr", cnt - 1, "Ptr")
-        DllCall("RedrawWindow", "Ptr", h, "Ptr", 0, "Ptr", 0
-            , "UInt", 0x0501)   ; RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN
+            DllCall("SendMessageW", "Ptr", hLv, "UInt", 0x1015, "Ptr", 0, "Ptr", cnt - 1, "Ptr")
+        DllCall("RedrawWindow", "Ptr", hLv, "Ptr", 0, "Ptr", 0, "UInt", 0x0501)
     }
 }
 
@@ -448,6 +493,18 @@ _LV_CustomDraw(lParam) {
     static O_HDC   := is64 ? 32 : 16
     static O_ITEM  := is64 ? 56 : 36
     static O_SUB   := is64 ? 88 : 56
+
+    ; GDI 리소스 캐싱
+    static MatchBr := 0, MatchPn := 0
+    static NotFndBr := 0, NotFndPn := 0
+    static WhiteBr := 0
+    if (!MatchBr) {
+        MatchBr := DllCall("CreateSolidBrush", "UInt", 0x006AB549, "Ptr")
+        MatchPn := DllCall("CreatePen", "Int", 0, "Int", 0, "UInt", 0x006AB549, "Ptr")
+        NotFndBr := DllCall("CreateSolidBrush", "UInt", 0x005353E5, "Ptr")
+        NotFndPn := DllCall("CreatePen", "Int", 0, "Int", 0, "UInt", 0x005353E5, "Ptr")
+        WhiteBr := DllCall("CreateSolidBrush", "UInt", 0x00FFFFFF, "Ptr")
+    }
 
     stage := NumGet(lParam, O_STAGE, "UInt")
 
@@ -485,7 +542,14 @@ _LV_CustomDraw(lParam) {
     rowL  := NumGet(rcBuf, 0, "Int")
     rowT  := NumGet(rcBuf, 4, "Int")
     rowB  := NumGet(rcBuf, 12, "Int")
-    col0W := _LV_Col0W > 10 ? _LV_Col0W : 76
+    ; [Fix] 캐시(_LV_Col0W)가 레이아웃 변경 전 값일 수 있으므로
+    ;       LVM_GETCOLUMNWIDTH(0x101D)로 실제 폭을 매 드로우마다 직접 측정.
+    ;       DllCall("SendMessageW")을 사용 — CustomDraw 내 AHK SendMessage 재진입 방지.
+    col0W := DllCall("SendMessageW", "Ptr", lvH, "UInt", 0x101D, "Ptr", 0, "Ptr", 0, "Ptr")
+    if col0W > 10
+        _LV_Col0W := col0W   ; 캐시도 최신값으로 갱신
+    else
+        col0W := _LV_Col0W > 10 ? _LV_Col0W : 76
     rowR  := rowL + col0W
     colW  := col0W
     cellH := rowB - rowT
@@ -506,20 +570,18 @@ _LV_CustomDraw(lParam) {
     else
         return 4  ; CDRF_SKIPDEFAULT (빈 셀 유지)
 
-    bgClr := InStr(text, "MATCH") ? 0x006AB549 : 0x005353E5
-
+    isMatch := InStr(text, "MATCH")
+    
     ; ── 렌더링 ──
     saved := DllCall("SaveDC", "Ptr", hdc, "Int")
     hRgn := DllCall("CreateRectRgn", "Int", rowL, "Int", rowT, "Int", rowR, "Int", rowB, "Ptr")
     DllCall("SelectClipRgn", "Ptr", hdc, "Ptr", hRgn)
 
     ; 셀 클리어
-    hBgBr := DllCall("CreateSolidBrush", "UInt", 0x00FFFFFF, "Ptr")
     bgRc := Buffer(16, 0)
     NumPut("Int", rowL, bgRc, 0),  NumPut("Int", rowT, bgRc, 4)
     NumPut("Int", rowR, bgRc, 8),  NumPut("Int", rowB, bgRc, 12)
-    DllCall("FillRect", "Ptr", hdc, "Ptr", bgRc, "Ptr", hBgBr)
-    DllCall("DeleteObject", "Ptr", hBgBr)
+    DllCall("FillRect", "Ptr", hdc, "Ptr", bgRc, "Ptr", WhiteBr)
 
     ; pill
     padX := 10, padY := 4
@@ -533,8 +595,8 @@ _LV_CustomDraw(lParam) {
     rad   := Integer(pillH / 2)
 
     if pillW >= 4 && pillH >= 4 {
-        hBr := DllCall("CreateSolidBrush", "UInt", bgClr, "Ptr")
-        hPn := DllCall("CreatePen", "Int", 0, "Int", 0, "UInt", bgClr, "Ptr")
+        hBr := isMatch ? MatchBr : NotFndBr
+        hPn := isMatch ? MatchPn : NotFndPn
         DllCall("SelectObject", "Ptr", hdc, "Ptr", hBr)
         DllCall("SelectObject", "Ptr", hdc, "Ptr", hPn)
         DllCall("RoundRect", "Ptr", hdc
@@ -547,8 +609,6 @@ _LV_CustomDraw(lParam) {
         NumPut("Int", pillX, trc, 0),          NumPut("Int", pillY, trc, 4)
         NumPut("Int", pillX + pillW, trc, 8),  NumPut("Int", pillY + pillH, trc, 12)
         DllCall("DrawTextW", "Ptr", hdc, "WStr", text, "Int", -1, "Ptr", trc, "UInt", 0x0825)
-        DllCall("DeleteObject", "Ptr", hBr)
-        DllCall("DeleteObject", "Ptr", hPn)
     }
 
     DllCall("RestoreDC", "Ptr", hdc, "Int", saved)
